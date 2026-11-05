@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Vanguard Nexus priorities</title>
+  <style>
+    :root { color-scheme: light dark; font-family: var(--font-sans, system-ui, sans-serif); color: var(--foreground, light-dark(#18212b, #e3e8ee)); }
+    body { margin: 0; line-height: 1.5; }
+    main { max-width: 860px; margin: 0 auto; }
+    h1 { font-size: 1.45rem; margin: 0 0 4px; }
+    .intro { color: var(--muted-foreground, light-dark(#576270, #a3afbd)); margin: 0 0 22px; }
+    h2 { font-size: 1rem; margin: 22px 0 8px; }
+    ul { padding-left: 20px; margin: 0; }
+    li { margin: 0 0 9px; }
+    strong { font-weight: 600; }
+    small { display: block; color: var(--muted-foreground, light-dark(#576270, #a3afbd)); font-size: .85rem; }
+    footer { font-size: .8rem; color: var(--muted-foreground, light-dark(#576270, #a3afbd)); margin: 24px 0 12px; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Vanguard Nexus priorities</h1>
+  <p class="intro">A Rust control panel for apps, clusters, and servers. A growing list of ideas, with short examples.</p>
+
+  <section>
+    <h2>Priority 1 · Foundation</h2>
+    <ul>
+      <li><strong>Rust core.</strong> Build the server, CLI, and agents in Rust.<small>Example: one shared API for the panel and CLI.</small></li>
+      <li><strong>Config-file setup and settings.</strong> Use a validated, versioned config file for platform settings.<small>Example: configure auth, database access, and alerts in YAML; mount through a ConfigMap later.</small></li>
+      <li><strong>Configuration ownership.</strong> Make file-managed settings clear in the dashboard.<small>Example: show where to change a setting and whether it needs a restart.</small></li>
+      <li><strong>Configuration validation.</strong> Catch invalid settings and missing dependencies before saving or applying changes.<small>Example: flag a missing secret reference before deploying an app.</small></li>
+      <li><strong>Database design.</strong> Decide where configuration, jobs, history, and agent state live.<small>Example: evaluate PostgreSQL for the server and local agent persistence; plan migrations and recovery.</small></li>
+      <li><strong>Installation packaging.</strong> Start with containers and plain Kubernetes manifests.<small>Example: mount the config file directly; add a Helm chart once configuration settles.</small></li>
+      <li><strong>Easy setup.</strong> Install the panel on a server or cluster using a config file.<small>Example: start the server with database and identity-provider settings supplied.</small></li>
+      <li><strong>Projects and environments.</strong> Group apps, access, and settings.<small>Example: one project with staging and production.</small></li>
+      <li><strong>Authentication and permissions.</strong> Connect OIDC and control access.<small>Example: Zitadel login with project operator roles.</small></li>
+      <li><strong>API and events.</strong> Let future tools manage apps through scoped access.<small>Example: another app requests a new environment.</small></li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>Priority 2 · First usable version</h2>
+    <ul>
+      <li><strong>Infrastructure inventory.</strong> Search servers, clusters, apps, domains, and volumes in one view.<small>Example: find every resource belonging to a production project.</small></li>
+      <li><strong>Saved views.</strong> Save frequently used filters for quick access.<small>Example: open a view of production issues or servers at home.</small></li>
+      <li><strong>Application ownership.</strong> Assign maintainers and contact details to services.<small>Example: find who owns an app when an alert fires.</small></li>
+      <li><strong>Kubernetes clusters.</strong> Connect existing clusters through an agent.<small>Example: manage a remote cluster from the same panel.</small></li>
+      <li><strong>Docker hosts.</strong> Deploy containers and supported Compose stacks.<small>Example: run an app and Redis on a VPS.</small></li>
+      <li><strong>Linux servers.</strong> Monitor hosts and manage enabled services.<small>Example: check disk space or restart a systemd service.</small></li>
+      <li><strong>Agent enrollment.</strong> Securely register and revoke machines.<small>Example: join with an expiring token and connect outbound.</small></li>
+      <li><strong>Connection recovery.</strong> Keep apps running if the panel disconnects.<small>Example: reconnect and report pending task results.</small></li>
+      <li><strong>App deployment.</strong> Deploy an image or build from a repository.<small>Example: publish a Git commit to staging.</small></li>
+      <li><strong>Domains and TLS.</strong> Route traffic and manage certificates.<small>Example: attach app.example.com with HTTPS.</small></li>
+      <li><strong>Configuration and secrets.</strong> Manage app settings and secret references.<small>Example: inject a database credential from OpenBao.</small></li>
+      <li><strong>Persistent storage.</strong> Configure volumes for application data.<small>Example: preserve uploads between deployments.</small></li>
+      <li><strong>Health and logs.</strong> Show app status, events, and deployment history.<small>Example: inspect why a container keeps restarting.</small></li>
+      <li><strong>Alerts.</strong> Notify on failures with deduplication and maintenance windows.<small>Example: alert when an agent disconnects or a disk fills up.</small></li>
+      <li><strong>Audit history.</strong> Record changes and who requested them.<small>Example: trace a production update to its approval.</small></li>
+      <li><strong>Maintenance mode.</strong> Pause deployments, automatic updates, and selected alerts during planned work.<small>Example: put a cluster into maintenance before upgrading its nodes.</small></li>
+      <li><strong>Change previews.</strong> Show planned changes and affected dependencies before applying them.<small>Example: review which services a storage change could affect.</small></li>
+      <li><strong>Disaster recovery.</strong> Back up the panel's configuration and state, with a documented recovery process.<small>Example: restore management on a replacement server after losing its host.</small></li>
+      <li><strong>Release recovery.</strong> Restore an earlier app version when safe.<small>Example: abort a failed canary; handle database recovery separately.</small></li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>Priority 3 · Delivery and management</h2>
+    <ul>
+      <li><strong>Storage growth forecasts.</strong> Estimate when volumes may fill up from recent usage.<small>Example: warn that an uploads volume could run out of space next week.</small></li>
+      <li><strong>Integration health.</strong> Show disconnected providers, expired credentials, and missing permissions.<small>Example: identify why a DNS integration can no longer update records.</small></li>
+      <li><strong>Infrastructure import.</strong> Discover existing workloads and choose monitoring or explicit management.<small>Example: inspect an existing app before handing control to the panel.</small></li>
+      <li><strong>Connectivity diagnostics.</strong> Check DNS, routes, ports, and VPN reachability to investigate connection failures.<small>Example: explain why an app cannot reach a database at another site.</small></li>
+      <li><strong>Site overview.</strong> Group infrastructure by location with health, capacity, and connection status.<small>Example: spot an offline site and its affected services at a glance.</small></li>
+      <li><strong>Upgrade compatibility checks.</strong> Check known version requirements across connected systems before upgrading.<small>Example: flag a Kubernetes upgrade that conflicts with a storage provider's supported versions.</small></li>
+      <li><strong>Incident timeline.</strong> Show a simple overview of alerts, deployments, and changes, with optional interactive detail.<small>Example: see the outage time and recent changes first, then expand events, logs, and filters.</small></li>
+      <li><strong>Network and VPN management.</strong> Prioritize connections to NetBird, Tailscale, and custom VPNs for multi-site infrastructure.<small>Example: view peers, site connectivity, routes, and supported access rules through provider integrations.</small></li>
+      <li><strong>Secret rotation.</strong> Track credential renewal and coordinate changes across affected apps.<small>Example: rotate a database credential and update its consumers.</small></li>
+      <li><strong>Runbooks.</strong> Save repeatable maintenance procedures with approvals and execution logs.<small>Example: drain a node, reboot it, and verify health before continuing.</small></li>
+      <li><strong>Service health checks.</strong> Test endpoints and ports beyond container health.<small>Example: alert when an app's HTTP endpoint fails while its container is running.</small></li>
+      <li><strong>Dependency map.</strong> Show relationships between apps and their supporting services.<small>Example: see which apps depend on a database before restarting it.</small></li>
+      <li><strong>Certificate management.</strong> Integrate with cert-manager and other certificate providers to track issuance, renewal, and expiry.<small>Example: identify a failed renewal and inspect its status from the dashboard.</small></li>
+      <li><strong>DNS management.</strong> Manage records through connected DNS providers.<small>Example: create an app's DNS record during deployment.</small></li>
+      <li><strong>Resource management.</strong> Track CPU, memory, and storage usage alongside capacity and limits.<small>Example: find room for a new app or adjust an existing app's limits.</small></li>
+      <li><strong>Scheduled jobs.</strong> Manage recurring tasks with execution history and failure alerts.<small>Example: run nightly cleanup and report a failed execution.</small></li>
+      <li><strong>Configuration comparison.</strong> Compare environments and highlight differences without exposing secret values.<small>Example: spot different images or missing secret references between staging and production.</small></li>
+      <li><strong>Temporary access.</strong> Grant scoped access with automatic expiry and an audit trail.<small>Example: give an operator access to a project for two hours.</small></li>
+      <li><strong>Reusable blueprints.</strong> Save common application setups with configurable values.<small>Example: deploy a standard web app with its database and domain settings.</small></li>
+      <li><strong>Talos Linux integration.</strong> Plan API-based node health, machine configuration, upgrades, and maintenance.<small>Example: review a Talos configuration change and upgrade nodes in stages with health checks.</small></li>
+      <li><strong>Build workers.</strong> Build images away from the management server.<small>Example: build a Dockerfile and push to a registry.</small></li>
+      <li><strong>GitOps.</strong> Sync declared configuration and detect drift.<small>Example: flag a manual change to a managed deployment.</small></li>
+      <li><strong>Progressive rollouts.</strong> Support canary and blue-green where available.<small>Example: send 10% of traffic to a new version.</small></li>
+      <li><strong>Promotion and approvals.</strong> Move a tested release between environments.<small>Example: approve the staging image for production.</small></li>
+      <li><strong>Storage provider integrations.</strong> Manage supported storage through provider APIs in the dashboard.<small>Example: inspect Longhorn volumes, capacity, and snapshots without switching tools.</small></li>
+      <li><strong>AI access.</strong> Expose diagnostics and approved actions through MCP.<small>Example: explain a failed release and propose a repair.</small></li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>Priority 4 · Future ideas</h2>
+    <ul>
+      <li><strong>Failure rehearsals.</strong> Simulate unavailable services or disconnected sites to test recovery.<small>Example: run a controlled outage exercise in a test environment.</small></li>
+      <li><strong>Application relocation.</strong> Guide moving apps between hosts or clusters, including data and traffic cutover.<small>Example: move a service to another site after verifying its copied data.</small></li>
+      <li><strong>Network lockout protection.</strong> Arrange automatic reverts for supported network changes unless connectivity is confirmed.<small>Example: revert a VPN route change if the management connection is lost.</small></li>
+      <li><strong>Incident replay.</strong> Reconstruct recorded configuration, versions, and events around an outage.<small>Example: review the deployed image and configuration changes preceding a failure.</small></li>
+      <li><strong>Offline recovery kit.</strong> Export encrypted essential configuration and recovery instructions.<small>Example: recover management when both the panel and identity provider are unavailable.</small></li>
+      <li><strong>Enterprise chaos testing.</strong> Explore optional integrations with Chaos Monkey or other failure-injection tools for resilience tests and team exercises.<small>Example: approve a scoped experiment with time limits, stop controls, and recovery checks.</small></li>
+      <li><strong>Orphan detection.</strong> Find unused resources for review before cleanup.<small>Example: flag unattached volumes, stale DNS records, and abandoned preview environments.</small></li>
+      <li><strong>Dynamic DNS.</strong> Explore built-in DDNS updates or integrations with existing services.<small>Example: update a hostname when a server's public IP changes.</small></li>
+      <li><strong>Update discovery.</strong> Periodically check tracked registries and GitHub releases or delivery repositories.<small>Example: compare a deployed NetBird image with a newer allowed version or changed tag digest.</small></li>
+      <li><strong>Upgrade notifications.</strong> Offer an upgrade through Slack, Discord, email, or the dashboard.<small>Example: send a NetBird update notice with release notes and a link to approve.</small></li>
+      <li><strong>Automatic update policies.</strong> Choose notify-only, approval-required, or automatic updates per app.<small>Example: update staging automatically during a maintenance window after health checks.</small></li>
+      <li><strong>Git-aware updates.</strong> Keep upgrade actions consistent with the deployment source.<small>Example: propose a Git change for managed apps; update a directly managed app through its agent.</small></li>
+      <li><strong>Preview environments.</strong> Create temporary apps for pull requests.<small>Example: remove the preview when the PR closes.</small></li>
+      <li><strong>Backups and restores.</strong> Schedule supported backups and test recovery.<small>Example: restore an app database from last night's backup.</small></li>
+      <li><strong>Backup verification.</strong> Automatically test restores in isolation and report failures.<small>Example: restore a database backup into a temporary environment and check it works.</small></li>
+      <li><strong>Fleet releases.</strong> Deploy across selected targets in stages.<small>Example: update a test cluster before production clusters.</small></li>
+      <li><strong>Cluster provisioning.</strong> Create and upgrade supported clusters.<small>Example: prepare Linux machines for a new cluster.</small></li>
+    </ul>
+  </section>
+  <footer>Working ideas, grouped by suggested priority. Scope and order can change as we plan.</footer>
+</main>
+</body>
+</html>

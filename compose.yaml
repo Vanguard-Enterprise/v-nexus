@@ -1,0 +1,65 @@
+# Local development services.
+#
+#   docker compose up -d                 start PostgreSQL only
+#   docker compose --profile app up -d   also build and run the server container
+
+name: vanguard-nexus
+
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: vn
+      POSTGRES_USER: vn
+      POSTGRES_PASSWORD: vn
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vn -d vn"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+
+  server:
+    profiles: ["app"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: vanguard-nexus:dev
+    environment:
+      VN_CONFIG: /etc/vn/vn.yaml
+      VN_DATABASE_URL: postgres://vn:vn@postgres:5432/vn
+      RUST_LOG: ${RUST_LOG:-info}
+    configs:
+      - source: vn-config
+        target: /etc/vn/vn.yaml
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "vn", "health", "--server", "http://127.0.0.1:8080"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+configs:
+  vn-config:
+    content: |
+      version: 1
+      server:
+        listen: 0.0.0.0:8080
+        static_dir: /usr/share/vn/web
+      database:
+        url_env: VN_DATABASE_URL
+        max_connections: 10
+
+volumes:
+  postgres-data:

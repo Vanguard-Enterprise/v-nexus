@@ -6,7 +6,7 @@ use axum::Router;
 use axum::extract::OriginalUri;
 use axum::http::{Method, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{any, get};
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer};
 use tracing::Level;
@@ -40,7 +40,12 @@ pub fn router(state: AppState, static_dir: Option<&Path>) -> Router {
         .fallback(api_not_found)
         .method_not_allowed_fallback(api_method_not_allowed);
 
-    let app = Router::new().nest("/api", api).with_state(state);
+    // `nest` covers `/api` and `/api/...` but not `/api/` itself, which would otherwise fall
+    // through to the UI.
+    let app = Router::new()
+        .nest("/api", api)
+        .route("/api/", any(api_not_found))
+        .with_state(state);
     let app = match static_dir {
         Some(dir) => {
             let index = ServeFile::new(dir.join("index.html"));

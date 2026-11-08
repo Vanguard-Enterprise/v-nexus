@@ -108,6 +108,7 @@ async fn unknown_api_paths_are_json_404() {
     let dir = static_site();
     for uri in [
         "/api",
+        "/api/",
         "/api/x",
         "/api/v1",
         "/api/v1/nope",
@@ -118,6 +119,19 @@ async fn unknown_api_paths_are_json_404() {
         let body = json_body(content_type, &body);
         assert_eq!(body["error"], "not_found", "{uri}");
         assert!(body["message"].as_str().unwrap().contains(uri), "{uri}");
+    }
+}
+
+#[tokio::test]
+async fn unknown_api_paths_are_json_404_without_static_dir() {
+    for uri in ["/api", "/api/", "/api/x"] {
+        let (status, content_type, body) = get(app(FakeDatabase::Up, None), uri).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{uri}");
+        assert_eq!(
+            json_body(content_type, &body)["error"],
+            "not_found",
+            "{uri}"
+        );
     }
 }
 

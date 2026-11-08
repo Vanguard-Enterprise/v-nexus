@@ -10,6 +10,7 @@ publish.workspace = true
 serde.workspace = true
 serde_norway.workspace = true
 thiserror.workspace = true
+url.workspace = true
 
 [lints]
 workspace = true

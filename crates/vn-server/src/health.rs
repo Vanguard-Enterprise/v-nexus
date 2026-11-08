@@ -5,7 +5,8 @@ use std::time::Duration;
 use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
-use sqlx::PgPool;
+use sqlx::pool::PoolConnection;
+use sqlx::{PgPool, Postgres};
 use vn_core::{DatabaseStatus, HealthResponse, HealthStatus};
 
 use crate::router::AppState;
@@ -26,9 +27,28 @@ pub trait DatabaseHealth: Send + Sync + 'static {
 impl DatabaseHealth for PgPool {
     fn ping(&self) -> PingFuture<'_> {
         Box::pin(async move {
-            sqlx::query("SELECT 1").execute(self).await?;
+            let mut conn = DetachOnCancel(Some(self.acquire().await?));
+            if let Some(conn) = conn.0.as_mut() {
+                sqlx::query("SELECT 1").execute(&mut **conn).await?;
+            }
+            // The query finished, so the connection is in a known state: return it to the pool.
+            drop(conn.0.take());
             Ok(())
         })
+    }
+}
+
+/// Holds a pooled connection while a probe runs. If the probe is cancelled mid-query (for
+/// example by [`PING_TIMEOUT`]), the connection is detached and dropped instead of being
+/// returned to the pool. Returning it would make the pool validate it against a database
+/// that is not answering, which can stall `PgPool::close` during shutdown.
+struct DetachOnCancel(Option<PoolConnection<Postgres>>);
+
+impl Drop for DetachOnCancel {
+    fn drop(&mut self) {
+        if let Some(conn) = self.0.take() {
+            drop(conn.detach());
+        }
     }
 }
 

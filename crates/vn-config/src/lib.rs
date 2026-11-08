@@ -84,6 +84,10 @@ pub enum ConfigError {
     EnvVarMissing { var: String },
     #[error("environment variable `{var}` named by `database.url_env` is empty")]
     EnvVarEmpty { var: String },
+    /// The message never includes the URL or any parameter value, since they may hold
+    /// credentials.
+    #[error("database URL in environment variable `{var}` is invalid: {message}")]
+    DatabaseUrlInvalid { var: String, message: String },
 }
 
 impl Config {
@@ -157,9 +161,56 @@ impl DatabaseConfig {
             Some(value) if value.trim().is_empty() => {
                 Err(ConfigError::EnvVarEmpty { var: var.clone() })
             }
-            Some(value) => Ok(DatabaseUrl(value)),
+            Some(value) => {
+                check_database_url(&value).map_err(|message| ConfigError::DatabaseUrlInvalid {
+                    var: var.clone(),
+                    message,
+                })?;
+                Ok(DatabaseUrl(value))
+            }
         }
     }
+}
+
+/// Query parameters the PostgreSQL driver understands. The driver logs unrecognized
+/// parameters together with their values, which could expose secrets such as
+/// `sslpassword`, so anything else is rejected here, before the driver sees it.
+const DATABASE_URL_PARAMS: &[&str] = &[
+    "sslmode",
+    "ssl-mode",
+    "sslrootcert",
+    "ssl-root-cert",
+    "ssl-ca",
+    "sslcert",
+    "ssl-cert",
+    "sslkey",
+    "ssl-key",
+    "statement-cache-capacity",
+    "host",
+    "hostaddr",
+    "port",
+    "dbname",
+    "user",
+    "password",
+    "application_name",
+    "options",
+];
+
+/// Checks the URL shape and its query parameter names. Error messages name parameter keys
+/// only, never values.
+fn check_database_url(value: &str) -> Result<(), String> {
+    let url = url::Url::parse(value.trim()).map_err(|err| format!("not a valid URL ({err})"))?;
+    if !matches!(url.scheme(), "postgres" | "postgresql") {
+        return Err("scheme must be `postgres` or `postgresql`".into());
+    }
+    for (key, _) in url.query_pairs() {
+        let known = DATABASE_URL_PARAMS.contains(&key.as_ref())
+            || (key.starts_with("options[") && key.ends_with(']'));
+        if !known {
+            return Err(format!("unsupported query parameter `{key}`"));
+        }
+    }
+    Ok(())
 }
 
 /// Database connection URL. May contain credentials, so `Debug` and `Display` redact it.
@@ -367,6 +418,29 @@ database:
             .resolve_url_with(|_| Some("  ".into()))
             .unwrap_err();
         assert!(matches!(empty, ConfigError::EnvVarEmpty { .. }));
+    }
+
+    #[test]
+    fn rejects_unsupported_url_parameters_without_echoing_values() {
+        let config = Config::from_yaml(VALID).unwrap();
+        let resolve = |url: &'static str| config.database.resolve_url_with(|_| Some(url.into()));
+
+        let err = resolve("postgres://vn:hunter2@db/vn?sslpassword=TOPSECRET").unwrap_err();
+        let message = err.to_string();
+        assert!(matches!(err, ConfigError::DatabaseUrlInvalid { .. }));
+        assert!(message.contains("`sslpassword`"), "{message}");
+        assert!(!message.contains("TOPSECRET"), "{message}");
+        assert!(!message.contains("hunter2"), "{message}");
+
+        let message = resolve("mysql://vn:hunter2@db/vn").unwrap_err().to_string();
+        assert!(message.contains("scheme"), "{message}");
+        assert!(!message.contains("hunter2"), "{message}");
+
+        let message = resolve("not a url hunter2").unwrap_err().to_string();
+        assert!(!message.contains("hunter2"), "{message}");
+
+        resolve("postgresql://vn:pw@db:5432/vn?sslmode=require&application_name=vn&options[search_path]=vn")
+            .unwrap();
     }
 
     #[test]

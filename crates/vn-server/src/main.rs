@@ -10,6 +10,9 @@ use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
 use vn_config::Config;
 
+/// Upper bound on closing the database pool during shutdown.
+const POOL_CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Vanguard Nexus server.
 #[derive(Debug, Parser)]
 #[command(name = "vn-server", version, about)]
@@ -21,8 +24,17 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    // sqlx logs unrecognized connection URL parameters with their values. vn-config rejects
+    // those before connecting, and this keeps any that slip through out of the logs.
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| "info".into())
+        .add_directive(
+            "sqlx_postgres::options::parse=off"
+                .parse()
+                .expect("static log directive is valid"),
+        );
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
+        .with_env_filter(filter)
         .with_ansi(std::io::stdout().is_terminal())
         .init();
 
@@ -75,7 +87,14 @@ async fn run(args: Args) -> anyhow::Result<()> {
         .await
         .context("server error")?;
 
-    pool.close().await;
+    // Closing waits for checked-out connections. Bound it so a stalled database cannot
+    // block shutdown indefinitely.
+    if tokio::time::timeout(POOL_CLOSE_TIMEOUT, pool.close())
+        .await
+        .is_err()
+    {
+        tracing::warn!(timeout = ?POOL_CLOSE_TIMEOUT, "timed out closing database connections");
+    }
     tracing::info!("shut down cleanly");
     Ok(())
 }

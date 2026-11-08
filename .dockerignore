@@ -1,0 +1,27 @@
+# Version control and CI metadata
+.git
+.github
+
+# Build output and dependencies
+target
+**/node_modules
+web/dist
+web/coverage
+**/*.tsbuildinfo
+
+# Local configuration and secrets
+vn.yaml
+.env
+.env.*
+
+# Editors and OS files
+.idea
+.vscode
+**/*.swp
+**/.DS_Store
+
+# Not needed in the image build context
+assets
+docs
+project-priorities.html
+compose.yaml

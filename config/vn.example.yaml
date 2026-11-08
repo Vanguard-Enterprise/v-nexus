@@ -1,0 +1,19 @@
+# Vanguard Nexus server configuration.
+# Copy to vn.yaml (or point --config / VN_CONFIG at it). Unknown fields are rejected.
+
+# Schema version of this file. Only version 1 is supported.
+version: 1
+
+server:
+  # Address and port the HTTP server binds to.
+  listen: 0.0.0.0:8080
+  # Built web UI (web/dist after `pnpm build`). Relative paths resolve against the
+  # working directory. Optional: if unset or missing on disk, UI routes return 404.
+  static_dir: web/dist
+
+database:
+  # Name of the environment variable that holds the PostgreSQL connection URL.
+  # The URL itself never goes in this file and is never logged.
+  url_env: VN_DATABASE_URL
+  # Maximum pooled connections. Optional, defaults to 10.
+  max_connections: 10

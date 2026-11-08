@@ -14,6 +14,11 @@ function describeError(error: Error): { title: string; detail: string } {
           title: "Server unreachable",
           detail: "The browser could not connect to the Vanguard Nexus server. Check that vn-server is running.",
         };
+      case "timeout":
+        return {
+          title: "Server not responding",
+          detail: `${error.message} Check that vn-server is running and not overloaded.`,
+        };
       case "unavailable":
         return {
           title: "Server unreachable",

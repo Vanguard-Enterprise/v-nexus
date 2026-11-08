@@ -1,7 +1,10 @@
 /** Base path for every versioned API route served by vn-server. */
 export const API_BASE = "/api/v1";
 
-export type ApiErrorKind = "network" | "unavailable" | "http" | "parse";
+export type ApiErrorKind = "network" | "timeout" | "unavailable" | "http" | "parse";
+
+/** Default time limit for an API request, including reading the body. */
+export const DEFAULT_TIMEOUT_MS = 10_000;
 
 /** Statuses a reverse proxy (or the Vite dev proxy) returns when vn-server is down. */
 const GATEWAY_STATUSES: readonly number[] = [502, 503, 504];
@@ -9,6 +12,7 @@ const GATEWAY_STATUSES: readonly number[] = [502, 503, 504];
 /**
  * A failed API call. `kind` lets the UI explain each failure:
  * - `network`: the request never got a response.
+ * - `timeout`: the server did not finish responding in time.
  * - `unavailable`: a proxy answered with a gateway error and no JSON body.
  * - `http`: the API answered with an error status.
  * - `parse`: the API answered with a body we do not understand.
@@ -34,6 +38,8 @@ export interface ApiGetOptions<T> {
    */
   acceptStatuses?: readonly number[];
   signal?: AbortSignal;
+  /** Abort and report a `timeout` error after this many milliseconds. */
+  timeoutMs?: number;
 }
 
 function apiUrl(path: string): string {
@@ -52,18 +58,14 @@ async function readJson(response: Response): Promise<unknown> {
   }
 }
 
+/** Picks a readable message from an API error body: `{"error":"<code>","message":"..."}`. */
 function errorMessageFrom(body: unknown): string | undefined {
-  if (typeof body === "object" && body !== null && "error" in body) {
-    const { error } = body;
-    if (typeof error === "string") return error;
-    if (typeof error === "object" && error !== null && "message" in error) {
-      const { message } = error;
-      if (typeof message === "string") return message;
-    }
+  if (typeof body !== "object" || body === null) return undefined;
+  if ("message" in body && typeof body.message === "string" && body.message !== "") {
+    return body.message;
   }
-  if (typeof body === "object" && body !== null && "message" in body) {
-    const { message } = body;
-    if (typeof message === "string") return message;
+  if ("error" in body && typeof body.error === "string" && body.error !== "") {
+    return body.error;
   }
   return undefined;
 }
@@ -71,21 +73,38 @@ function errorMessageFrom(body: unknown): string | undefined {
 /** GET a JSON resource under {@link API_BASE}. Throws {@link ApiError} on failure. */
 export async function apiGet<T>(path: string, options: ApiGetOptions<T>): Promise<T> {
   const url = apiUrl(path);
+  const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const timeoutSignal = AbortSignal.timeout(timeoutMs);
+  const signal = options.signal ? AbortSignal.any([options.signal, timeoutSignal]) : timeoutSignal;
+
+  // A caller abort (for example TanStack Query cancelling) propagates as-is.
+  // Our own timeout becomes an ApiError the UI can explain.
+  const throwIfAborted = (cause?: unknown) => {
+    options.signal?.throwIfAborted();
+    if (timeoutSignal.aborted) {
+      throw new ApiError(
+        "timeout",
+        `The server did not respond within ${String(Math.round(timeoutMs / 1000))} seconds.`,
+        { cause },
+      );
+    }
+  };
+
   let response: Response;
   try {
     response = await fetch(url, {
       method: "GET",
       headers: { Accept: "application/json" },
-      ...(options.signal ? { signal: options.signal } : {}),
+      signal,
     });
   } catch (cause) {
-    if (cause instanceof DOMException && cause.name === "AbortError") {
-      throw cause;
-    }
+    throwIfAborted(cause);
     throw new ApiError("network", "The server could not be reached.", { cause });
   }
 
   const body = await readJson(response);
+  // readJson swallows body errors, so check whether reading was cut short.
+  throwIfAborted();
   const accepted =
     response.ok ||
     // An accepted error status only counts when it carries a JSON body. A bare

@@ -18,7 +18,9 @@ export function jsonResponse(body: unknown, status = 200): Response {
 }
 
 /** Replaces global fetch with a mock and returns it. Vitest unstubs globals after each test. */
-export function mockFetch(implementation: (input: RequestInfo | URL) => Promise<Response>) {
+export function mockFetch(
+  implementation: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>,
+) {
   const fetchMock = vi.fn<typeof fetch>(implementation);
   vi.stubGlobal("fetch", fetchMock);
   return fetchMock;

@@ -9,6 +9,7 @@ use chrono::{DateTime, TimeDelta, Utc};
 use sha2::{Digest, Sha256};
 
 /// Activity is written back at most this often, to keep reads from turning into writes.
+/// Short idle timeouts use half the timeout instead; see [`SessionTimes::needs_touch`].
 pub(crate) const TOUCH_INTERVAL: TimeDelta = TimeDelta::seconds(60);
 
 /// Longest cookie value accepted as a session or login token. Real tokens are 43 bytes.
@@ -77,9 +78,11 @@ impl SessionTimes {
         }
     }
 
-    /// Whether `last_seen_at` is old enough to be worth updating.
-    pub(crate) fn needs_touch(&self, now: DateTime<Utc>) -> bool {
-        now - self.last_seen_at >= TOUCH_INTERVAL
+    /// Whether `last_seen_at` is old enough to be worth updating. The interval is the
+    /// smaller of [`TOUCH_INTERVAL`] and half the idle timeout, so a session in steady use
+    /// is always touched well before it would go idle.
+    pub(crate) fn needs_touch(&self, now: DateTime<Utc>, idle_timeout: TimeDelta) -> bool {
+        now - self.last_seen_at >= TOUCH_INTERVAL.min(idle_timeout / 2)
     }
 }
 
@@ -133,8 +136,30 @@ mod tests {
     #[test]
     fn touches_at_most_once_per_interval() {
         let session = times(0, 720);
-        assert!(!session.needs_touch(at(0) + TimeDelta::seconds(59)));
-        assert!(session.needs_touch(at(1)));
+        assert!(!session.needs_touch(at(0) + TimeDelta::seconds(59), IDLE));
+        assert!(session.needs_touch(at(1), IDLE));
+    }
+
+    #[test]
+    fn short_idle_timeouts_touch_at_half_the_timeout() {
+        let idle = TimeDelta::minutes(1);
+        let session = times(0, 720);
+        assert!(!session.needs_touch(at(0) + TimeDelta::seconds(29), idle));
+        assert!(session.needs_touch(at(0) + TimeDelta::seconds(30), idle));
+    }
+
+    #[test]
+    fn steady_requests_keep_a_short_idle_session_active() {
+        let idle = TimeDelta::minutes(1);
+        let mut session = times(0, 720);
+        let mut now = at(0);
+        while now < at(5) {
+            now += TimeDelta::seconds(20);
+            assert_eq!(session.status(now, idle), SessionStatus::Active, "at {now}");
+            if session.needs_touch(now, idle) {
+                session.last_seen_at = now;
+            }
+        }
     }
 
     #[test]

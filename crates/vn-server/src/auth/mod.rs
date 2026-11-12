@@ -165,7 +165,7 @@ async fn authenticate(state: &AppState, headers: &HeaderMap) -> Result<Principal
     if times.status(now, auth.idle_timeout) != SessionStatus::Active {
         return Err(expired());
     }
-    if times.needs_touch(now) {
+    if times.needs_touch(now, auth.idle_timeout) {
         sqlx::query("UPDATE sessions SET last_seen_at = $2 WHERE id = $1 AND revoked_at IS NULL")
             .bind(row.session_id)
             .bind(now)

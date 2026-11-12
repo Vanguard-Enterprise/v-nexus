@@ -67,7 +67,7 @@ Other providers work the same way. For providers that put group names in a `grou
 
 ### Sessions and roles
 
-Sessions are stored in PostgreSQL and end after `auth.session.idle_timeout_minutes` without a request (default 60) or `auth.session.absolute_timeout_minutes` after sign-in (default 720), whichever comes first. Signing out revokes the session. The admin role is evaluated at sign-in, so a change at the provider applies at the user's next sign-in.
+Sessions are stored in PostgreSQL and end after `auth.session.idle_timeout_minutes` without a request (default 60) or `auth.session.absolute_timeout_minutes` after sign-in (default 720), whichever comes first. Signing out revokes the session. The admin role is evaluated at sign-in, so a change at the provider applies at the user's next sign-in. Removing the role at the provider does not end existing sessions: each keeps the admin role it was issued with until it is signed out or reaches its idle or absolute timeout. Keep `absolute_timeout_minutes` short where that matters.
 
 Installation admins create projects and assign project roles through the API. Users appear after their first sign-in. From the browser's developer console while signed in as an admin:
 

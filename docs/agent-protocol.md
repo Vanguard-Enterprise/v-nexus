@@ -67,7 +67,7 @@ Receivers ignore unknown fields. A receiver that gets an unknown message type re
 1. The server sends `welcome` with the connection ID, the sync epoch, the heartbeat interval, the acknowledgement window, the message size limit, and its capabilities.
 2. The agent sends `hello` with its version, capabilities, cluster fingerprint, and, once jobs exist, its unfinished and unacknowledged jobs.
 
-The server allocates a sync epoch each time it accepts a connection, by atomically incrementing a counter on the source record in PostgreSQL. For a cluster agent the source record is the cluster record. The counter belongs to the source, not the agent, so it keeps increasing when a replacement agent enrolls for an existing cluster. A cluster has one active agent at a time. A new connection supersedes any older connection for the same agent, which the server closes with code 4009. The sync epoch orders observations across connections and across agent replacements.
+The server allocates a sync epoch each time it accepts a connection, by atomically incrementing a counter on the source record in PostgreSQL. For a cluster agent the source record is the cluster record. The counter belongs to the source, not the agent, so it keeps increasing when a replacement agent enrolls for an existing cluster. A cluster has one active agent at a time. A new connection supersedes any older connection for the same agent, which the server closes with code 4009. The sync epoch orders observations across connections and across agent replacements, and the epoch fence (see [Observations](#observations)) stops a superseded connection from persisting anything.
 
 ## Collections and scope
 
@@ -105,7 +105,9 @@ The agent sanitizes objects before sending them. Secret data, managed fields, an
 Ordering:
 
 - Each observation's order key is `(sync_epoch, seq)`. The server stores one order key per resource (cluster and UID): the key of the latest observation accepted for it.
-- An observation whose key is not greater than the stored key is ignored. A delayed message from an older connection or a replaced agent has a lower epoch and is ignored.
+- Epoch fence: each ingest transaction reads the source record's current sync epoch with a row lock (`FOR SHARE`) and persists nothing if it differs from the connection's epoch. Allocating a new epoch updates the same row, so it waits for ingest transactions in flight, and every later transaction from the older connection sees the new epoch. The server then closes the older connection with code 4009, if it is still open, and discards its remaining messages without acknowledging them.
+- The fence is needed because per-resource keys protect only resources that have a stored row. Without it, a delayed `upsert` from a superseded connection, for a resource that was never persisted and is absent from the newer connection's snapshot, would be accepted after that snapshot ends and add a resource that does not exist.
+- Per-resource keys remain a second layer. An observation whose key is not greater than the stored key is ignored.
 - An accepted `upsert` always advances the stored key, which records that the resource was seen. It replaces the stored content only when it passes the resource version rule.
 - Resource version rule: when both resource versions are decimal strings, the server rejects content whose resource version is lower than the stored one. Kubernetes guarantees this ordering for 1.35 and later API servers within one resource type. It protects against a stale list after a reconnect.
 - An accepted `delete` advances the stored key and replaces the resource with a tombstone that keeps its last known resource version. A replacement with the same name has a new UID and is a new resource.
@@ -114,13 +116,18 @@ Ordering:
 ## Acknowledgements and flow control
 
 - The server sends `ack { seq }` after the transaction containing that message commits. Acknowledgements are cumulative.
-- The agent keeps no more unacknowledged messages than the window announced in `welcome`. When the window is full, it stops sending and coalesces pending changes per collection and UID, keeping only the latest. A `delete` replaces a pending `upsert`. Memory is bounded by the number of resources, not the event rate.
-- The server processes each connection's messages in order and may batch consecutive observations into one transaction. Each ingest transaction checks that the agent is still active.
+- The agent keeps no more unacknowledged messages than the window announced in `welcome`. When the window is full, it stops sending and queues pending messages.
+- Snapshot messages (`snapshot_start`, its `upsert` messages, and `snapshot_end`) stay in order and are never merged or dropped.
+- Coalescing applies only to watch events queued after the collection's latest `snapshot_end`, and never across a snapshot message of the same collection. A newer watch event for the same collection and UID replaces the pending one. A `delete` replaces a pending `upsert`.
+- A new snapshot for a collection replaces the unsent remainder of the previous one. The agent drops those items and sends `snapshot_abort` for the previous snapshot.
+- Memory is bounded by at most one snapshot's items per collection plus one pending change per resource, not by the event rate.
+- If the agent must discard a snapshot item anyway, for example to stay within a memory limit, it sends `snapshot_abort` for that snapshot and relists the collection to start a new one.
+- The server processes each connection's messages in order and may batch consecutive observations into one transaction. Each ingest transaction checks that the agent is still active (otherwise it closes the connection with code 4003) and applies the epoch fence.
 - Acknowledgements are for flow control and durability, not retransmission. TCP delivers messages in order within a connection. After a disconnect, the agent discards unacknowledged observations and reconciles from scratch.
 
 ## Duplicate delivery
 
-Duplicates come from reconnect snapshots, watcher relists, and a superseded connection whose messages are still being processed. All are harmless:
+Duplicates come from reconnect snapshots and watcher relists. Messages from a superseded connection that are still being processed stop at the epoch fence. All duplicates are harmless:
 
 - An `upsert` with the same UID and resource version as the stored observation leaves the content unchanged. If its order key is greater, it still advances the stored key and the last-confirmed time, so a snapshot that lists an unchanged resource does not delete it.
 - An observation with an older order key is ignored.

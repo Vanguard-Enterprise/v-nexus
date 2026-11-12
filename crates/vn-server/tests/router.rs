@@ -6,9 +6,10 @@ use axum::body::Body;
 use axum::http::{Method, Request, StatusCode, header};
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
+use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
 use tower::ServiceExt;
-use vn_server::{AppState, DatabaseHealth, PingFuture, router};
+use vn_server::{AppState, AuthService, DatabaseHealth, PingFuture, router};
 
 /// Database stand-in with a fixed outcome.
 enum FakeDatabase {
@@ -29,8 +30,42 @@ impl DatabaseHealth for FakeDatabase {
     }
 }
 
+/// A pool that never connects; requests that reach the database fail.
+fn unreachable_pool() -> PgPool {
+    PgPoolOptions::new()
+        .acquire_timeout(Duration::from_secs(1))
+        .connect_lazy("postgres://vn:vn@127.0.0.1:1/vn")
+        .unwrap()
+}
+
 fn app(database: impl DatabaseHealth, static_dir: Option<&Path>) -> Router {
-    router(AppState::new(database), static_dir)
+    router(
+        AppState::new(unreachable_pool()).with_health_check(database),
+        static_dir,
+    )
+}
+
+fn app_with_auth() -> Router {
+    let config = vn_config::Config::from_yaml(
+        "version: 1\n\
+         server: {listen: 127.0.0.1:0}\n\
+         database: {url_env: VN_DATABASE_URL}\n\
+         auth:\n\
+         \x20 issuer_url: http://127.0.0.1:1\n\
+         \x20 client_id: vn\n\
+         \x20 client_secret_env: VN_OIDC_CLIENT_SECRET\n\
+         \x20 public_url: https://vn.example.com\n\
+         \x20 admin: {claim: groups, values: [admins]}\n",
+    )
+    .unwrap();
+    let auth = config.auth.unwrap();
+    let secret = auth
+        .resolve_client_secret_with(|_| Some("test-secret".into()))
+        .unwrap();
+    let state = AppState::new(unreachable_pool())
+        .with_health_check(FakeDatabase::Up)
+        .with_auth(AuthService::new(&auth, &secret).unwrap());
+    router(state, None)
 }
 
 async fn send(app: Router, method: Method, uri: &str) -> (StatusCode, Option<String>, Vec<u8>) {
@@ -39,6 +74,13 @@ async fn send(app: Router, method: Method, uri: &str) -> (StatusCode, Option<Str
         .uri(uri)
         .body(Body::empty())
         .unwrap();
+    send_request(app, request).await
+}
+
+async fn send_request(
+    app: Router,
+    request: Request<Body>,
+) -> (StatusCode, Option<String>, Vec<u8>) {
     let response = app.oneshot(request).await.unwrap();
     let status = response.status();
     let content_type = response
@@ -98,7 +140,8 @@ async fn health_is_503_when_postgres_is_unreachable() {
         .acquire_timeout(Duration::from_secs(1))
         .connect_lazy("postgres://vn:vn@127.0.0.1:1/vn")
         .unwrap();
-    let (status, content_type, body) = get(app(pool, None), "/api/v1/health").await;
+    let (status, content_type, body) =
+        get(router(AppState::new(pool), None), "/api/v1/health").await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(json_body(content_type, &body)["status"], "degraded");
 }
@@ -174,6 +217,98 @@ async fn serves_static_files_with_spa_fallback() {
 async fn ui_routes_are_404_without_static_dir() {
     let (status, _, _) = get(app(FakeDatabase::Up, None), "/").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+const PROTECTED: [(&str, &str); 7] = [
+    ("GET", "/api/v1/projects"),
+    ("POST", "/api/v1/projects"),
+    ("GET", "/api/v1/projects/prod"),
+    ("GET", "/api/v1/projects/prod/members"),
+    (
+        "PUT",
+        "/api/v1/projects/prod/members/00000000-0000-0000-0000-000000000000",
+    ),
+    (
+        "DELETE",
+        "/api/v1/projects/prod/members/00000000-0000-0000-0000-000000000000",
+    ),
+    ("GET", "/api/v1/users"),
+];
+
+#[tokio::test]
+async fn protected_routes_are_json_401_without_a_session() {
+    for (method, uri) in PROTECTED.into_iter().chain([("GET", "/api/v1/auth/me")]) {
+        for (app, code) in [
+            (app(FakeDatabase::Up, None), "auth_not_configured"),
+            (app_with_auth(), "unauthorized"),
+        ] {
+            let (status, content_type, body) = send(app, method.parse().unwrap(), uri).await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{method} {uri}");
+            assert_eq!(
+                json_body(content_type, &body)["error"],
+                code,
+                "{method} {uri}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn health_needs_no_session_when_auth_is_enabled() {
+    let (status, _, _) = get(app_with_auth(), "/api/v1/health").await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn login_is_503_when_auth_is_not_configured() {
+    let (status, content_type, body) = get(app(FakeDatabase::Up, None), "/api/v1/auth/login").await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        json_body(content_type, &body)["error"],
+        "auth_not_configured"
+    );
+}
+
+#[tokio::test]
+async fn login_is_503_when_the_provider_is_unreachable() {
+    let (status, content_type, body) = get(app_with_auth(), "/api/v1/auth/login").await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        json_body(content_type, &body)["error"],
+        "identity_provider_unavailable"
+    );
+}
+
+#[tokio::test]
+async fn cookie_requests_from_another_origin_are_rejected() {
+    for origin in [Some("https://evil.example"), Some("null"), None] {
+        let mut request = Request::builder()
+            .method(Method::POST)
+            .uri("/api/v1/projects")
+            .header(header::COOKIE, "__Host-vn_session=abc")
+            .header(header::CONTENT_TYPE, "application/json");
+        if let Some(origin) = origin {
+            request = request.header(header::ORIGIN, origin);
+        }
+        let request = request
+            .body(Body::from(r#"{"slug":"x","name":"x"}"#))
+            .unwrap();
+        let (status, content_type, body) = send_request(app_with_auth(), request).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{origin:?}");
+        assert_eq!(json_body(content_type, &body)["error"], "csrf_rejected");
+    }
+}
+
+#[tokio::test]
+async fn logout_without_a_session_succeeds() {
+    let request = Request::builder()
+        .method(Method::POST)
+        .uri("/api/v1/auth/logout")
+        .header(header::ORIGIN, "https://vn.example.com")
+        .body(Body::empty())
+        .unwrap();
+    let response = app_with_auth().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
 }
 
 const INDEX_HTML: &str = "<!doctype html><title>Vanguard Nexus</title>";

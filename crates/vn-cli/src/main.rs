@@ -36,7 +36,8 @@ enum ConfigCommand {
     Validate {
         /// Path to the YAML config file.
         path: PathBuf,
-        /// Also require the database URL environment variable to be set.
+        /// Also require the environment variables named in the file (database URL and,
+        /// when sign-in is configured, the OIDC client secret) to be set.
         #[arg(long)]
         check_env: bool,
     },
@@ -109,6 +110,9 @@ fn validate_config(path: &std::path::Path, check_env: bool) -> anyhow::Result<()
     let config = Config::load(path)?;
     if check_env {
         config.database.resolve_url()?;
+        if let Some(auth) = &config.auth {
+            auth.resolve_client_secret()?;
+        }
     }
     println!("{}: valid (version {})", path.display(), config.version);
     Ok(())
@@ -145,7 +149,11 @@ mod tests {
     async fn serve(database_up: bool) -> String {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let app = vn_server::router(AppState::new(FakeDatabase(database_up)), None);
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://vn:vn@127.0.0.1:1/vn")
+            .unwrap();
+        let state = AppState::new(pool).with_health_check(FakeDatabase(database_up));
+        let app = vn_server::router(state, None);
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         format!("http://{addr}")
     }

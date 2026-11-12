@@ -1,8 +1,14 @@
 //! Vanguard Nexus server: HTTP API, static UI, and database lifecycle.
 
+mod audit;
+mod auth;
+mod authz;
+mod error;
 mod health;
+mod projects;
 mod router;
 
+pub use auth::{AuthService, AuthSetupError};
 pub use health::{DatabaseHealth, PingFuture};
 pub use router::{AppState, router};
 

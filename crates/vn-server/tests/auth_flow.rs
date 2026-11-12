@@ -619,6 +619,7 @@ async fn browser_sign_in_creates_a_hashed_server_side_session() {
     assert_eq!(session.max_age(), Some(cookie::time::Duration::hours(12)));
     let cleared = callback.cookie(LOGIN_COOKIE).expect("login cookie removal");
     assert_eq!(cleared.value(), "");
+    assert_eq!(cleared.max_age(), Some(cookie::time::Duration::ZERO));
 
     // Only a hash of the token is stored.
     let token = session.value().to_owned();
@@ -662,6 +663,7 @@ async fn logout_revokes_the_session() {
     assert_eq!(logout.status, StatusCode::NO_CONTENT);
     let removal = logout.cookie(SESSION_COOKIE).expect("cookie removal");
     assert_eq!(removal.value(), "");
+    assert_eq!(removal.max_age(), Some(cookie::time::Duration::ZERO));
 
     let me = h.get(&token, "/api/v1/auth/me").await;
     assert_eq!(me.status, StatusCode::UNAUTHORIZED);

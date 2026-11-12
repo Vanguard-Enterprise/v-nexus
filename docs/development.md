@@ -53,6 +53,8 @@ The `auth` section in `config/vn.example.yaml` documents every setting. The valu
 export VN_OIDC_CLIENT_SECRET=<client secret>
 ```
 
+The provider must sign ID tokens with an asymmetric algorithm (RS*, PS*, ES*, or EdDSA). VN rejects ID tokens signed with a shared-secret algorithm (HS256, HS384, or HS512), because their integrity would rest on the client secret; configure the provider to use RS256 if it offers a choice. When an ID token names a signing key VN has not seen, VN fetches the provider's keys again once, so key rotation needs no restart.
+
 ### Zitadel
 
 1. In a Zitadel project, create a role with key `vn-admin` and grant it to your user.

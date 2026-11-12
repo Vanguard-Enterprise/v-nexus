@@ -7,7 +7,7 @@
 //! after printing that they were skipped.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use axum::body::Body;
@@ -22,7 +22,7 @@ use chrono::{TimeDelta, Utc};
 use cookie::Cookie;
 use http_body_util::BodyExt;
 use openidconnect::core::{
-    CoreGenderClaim, CoreJweContentEncryptionAlgorithm, CoreJwsSigningAlgorithm,
+    CoreGenderClaim, CoreHmacKey, CoreJweContentEncryptionAlgorithm, CoreJwsSigningAlgorithm,
     CoreRsaPrivateSigningKey,
 };
 use openidconnect::{
@@ -170,6 +170,8 @@ struct MockInner {
     signing_kid: Mutex<String>,
     /// Key ID of the RSA key published at the JWKS endpoint.
     published_kid: Mutex<String>,
+    /// Sign ID tokens with HS256 and the client secret instead.
+    sign_with_client_secret: AtomicBool,
     jwks_fetches: AtomicUsize,
     grants: Mutex<HashMap<String, Grant>>,
     userinfo: Mutex<HashMap<String, Value>>,
@@ -202,6 +204,7 @@ impl MockProvider {
             issuer,
             signing_kid: Mutex::new("k1".into()),
             published_kid: Mutex::new("k1".into()),
+            sign_with_client_secret: AtomicBool::new(false),
             jwks_fetches: AtomicUsize::new(0),
             grants: Mutex::default(),
             userinfo: Mutex::default(),
@@ -268,6 +271,11 @@ impl MockProvider {
         *self.0.signing_kid.lock().unwrap() = kid.into();
     }
 
+    /// Signs ID tokens with HS256 keyed by the client secret, and advertises only HS256.
+    fn sign_with_client_secret(&self) {
+        self.0.sign_with_client_secret.store(true, Ordering::SeqCst);
+    }
+
     fn jwks_fetches(&self) -> usize {
         self.0.jwks_fetches.load(Ordering::SeqCst)
     }
@@ -280,6 +288,11 @@ impl MockProvider {
 
 async fn discovery(State(p): State<MockProvider>) -> Json<Value> {
     let issuer = p.issuer();
+    let alg = if p.0.sign_with_client_secret.load(Ordering::SeqCst) {
+        "HS256"
+    } else {
+        "RS256"
+    };
     Json(json!({
         "issuer": issuer,
         "authorization_endpoint": format!("{issuer}/authorize"),
@@ -288,7 +301,7 @@ async fn discovery(State(p): State<MockProvider>) -> Json<Value> {
         "jwks_uri": format!("{issuer}/jwks"),
         "response_types_supported": ["code"],
         "subject_types_supported": ["public"],
-        "id_token_signing_alg_values_supported": ["RS256"],
+        "id_token_signing_alg_values_supported": [alg],
         "code_challenge_methods_supported": ["S256"],
     }))
 }
@@ -350,14 +363,26 @@ async fn token(
         TestClaims { claims: extra },
     )
     .set_nonce(Some(Nonce::new(grant.nonce)));
-    let key = rsa_key(&p.0.signing_kid.lock().unwrap());
-    let id_token = TestIdToken::new(
-        claims,
-        &key,
-        CoreJwsSigningAlgorithm::RsaSsaPkcs1V15Sha256,
-        Some(&AccessToken::new(access_token.clone())),
-        None,
-    )
+    let id_token = if p.0.sign_with_client_secret.load(Ordering::SeqCst) {
+        // No at_hash, so nothing but the algorithm check can stop this token: the
+        // crate's verifier accepts HS256 keyed by the client secret.
+        TestIdToken::new(
+            claims,
+            &CoreHmacKey::new(CLIENT_SECRET),
+            CoreJwsSigningAlgorithm::HmacSha256,
+            None,
+            None,
+        )
+    } else {
+        let key = rsa_key(&p.0.signing_kid.lock().unwrap());
+        TestIdToken::new(
+            claims,
+            &key,
+            CoreJwsSigningAlgorithm::RsaSsaPkcs1V15Sha256,
+            Some(&AccessToken::new(access_token.clone())),
+            None,
+        )
+    }
     .unwrap();
 
     let mut info = json!({ "sub": user.subject });
@@ -730,6 +755,20 @@ async fn id_token_signed_with_an_unpublished_key_is_rejected_after_one_refresh()
     assert!(response.cookie(SESSION_COOKIE).is_none());
     assert_eq!(h.provider.jwks_fetches(), 2);
     assert_eq!(session_count(&h).await, 1);
+
+    h.finish().await;
+}
+
+#[tokio::test]
+async fn id_tokens_signed_with_the_client_secret_are_rejected() {
+    let h = harness!(Harness::start());
+    h.provider.sign_with_client_secret();
+    let login = h.start_login("/").await;
+    let (code, state) = h.provider.authorize(&login.location, alice());
+    let response = h.callback(&code, &state, Some(&login.login_cookie)).await;
+    assert_eq!(response.location(), "/?login_error=failed");
+    assert!(response.cookie(SESSION_COOKIE).is_none());
+    assert_eq!(session_count(&h).await, 0);
 
     h.finish().await;
 }

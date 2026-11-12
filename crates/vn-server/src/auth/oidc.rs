@@ -15,9 +15,9 @@ use openidconnect::{
     AccessTokenHash, AdditionalClaims, AsyncHttpClient, AuthenticationFlow, AuthorizationCode,
     ClaimsVerificationError, ClientId, ClientSecret, CsrfToken, EmptyExtraTokenFields,
     EndpointMaybeSet, EndpointNotSet, EndpointSet, HttpRequest, HttpResponse, IdTokenFields,
-    IssuerUrl, Nonce, OAuth2TokenResponse, PkceCodeChallenge, PkceCodeVerifier, RedirectUrl,
-    RequestTokenError, Scope, SignatureVerificationError, StandardErrorResponse,
-    StandardTokenResponse, TokenResponse,
+    IssuerUrl, JwsSigningAlgorithm, Nonce, OAuth2TokenResponse, PkceCodeChallenge,
+    PkceCodeVerifier, RedirectUrl, RequestTokenError, Scope, SignatureVerificationError,
+    StandardErrorResponse, StandardTokenResponse, TokenResponse,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
@@ -235,6 +235,20 @@ impl Oidc {
             .map_err(|err| OidcError::TokenExchange(describe_token_error(&err)))?;
 
         let id_token = token.id_token().ok_or(OidcError::MissingIdToken)?;
+        // Read from the unverified header, which is safe because it can only refuse a token.
+        // Shared-secret algorithms would tie ID token integrity to the client secret.
+        let alg = id_token
+            .signing_alg()
+            .map_err(|err| OidcError::IdToken(err.to_string()))?;
+        if alg.uses_shared_secret() {
+            return Err(OidcError::IdToken(
+                "ID token is signed with a shared-secret algorithm (HS256/HS384/HS512). \
+                 Vanguard Nexus accepts only asymmetric ID token signatures (RS*, PS*, ES*, \
+                 EdDSA); configure the provider to sign ID tokens with RS256."
+                    .into(),
+            ));
+        }
+
         let nonce = Nonce::new(nonce.to_owned());
         let first = id_token.claims(&client.id_token_verifier(), &nonce);
         let (client, claims) = match first {
@@ -257,9 +271,6 @@ impl Oidc {
         };
 
         if let Some(expected) = claims.access_token_hash() {
-            let alg = id_token
-                .signing_alg()
-                .map_err(|err| OidcError::IdToken(err.to_string()))?;
             let verifier = client.id_token_verifier();
             let key = id_token
                 .signing_key(&verifier)

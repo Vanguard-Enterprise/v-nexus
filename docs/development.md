@@ -31,7 +31,7 @@ cp config/vn.example.yaml vn.yaml
 export VN_DATABASE_URL=postgres://vn:vn@localhost:5432/vn
 ```
 
-Check a config file without starting the server (`--check-env` also requires the named environment variables to be set):
+Check a config file without starting the server. `--check-env` also requires the named environment variables to be set: with the example's `auth` section that includes `VN_OIDC_CLIENT_SECRET`, so export it first (see [Configure sign-in](#configure-sign-in)), or remove the `auth` section to validate a config without sign-in.
 
 ```sh
 cargo run -p vn-cli -- config validate vn.yaml --check-env
@@ -81,10 +81,12 @@ const send = (method, path, body) =>
 
 await send("POST", "/projects", { slug: "prod", name: "Production" });
 const { users } = await (await fetch("/api/v1/users")).json();
-await send("PUT", `/projects/prod/members/${users[0].id}`, { role: "viewer" });
+const user = users.find((u) => u.subject === "<subject>");
+if (!user) throw new Error("No user with that subject. They must sign in once first.");
+await send("PUT", `/projects/prod/members/${user.id}`, { role: "viewer" });
 ```
 
-`viewer` may view a project; `operator` may also operate it. Users only see projects they hold a role in, and admins see all of them.
+Replace `<subject>` with the user's subject (`sub` claim) at the provider. `viewer` may view a project; `operator` may also operate it. Users only see projects they hold a role in, and admins see all of them.
 
 ## Run the server
 

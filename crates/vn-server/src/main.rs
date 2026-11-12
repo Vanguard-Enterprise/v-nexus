@@ -85,12 +85,18 @@ async fn run(args: Args) -> anyhow::Result<()> {
                 public_url = %auth.public_origin(),
                 "OIDC sign-in enabled"
             );
-            if auth.allow_insecure_http && auth.uses_insecure_http() {
+            if auth.allow_insecure_http && auth.issuer_uses_http() {
                 tracing::warn!(
-                    "auth.allow_insecure_http is set and the issuer or public URL uses http: \
-                     provider responses can be tampered with in transit and session cookies \
-                     are not marked Secure; use https outside development over a trusted \
-                     network"
+                    "auth.allow_insecure_http is set and auth.issuer_url uses http: provider \
+                     metadata, signing keys, and token responses can be tampered with in \
+                     transit; use https outside development over a trusted network"
+                );
+            }
+            if auth.allow_insecure_http && !auth.is_https() {
+                tracing::warn!(
+                    "auth.allow_insecure_http is set and auth.public_url uses http: session \
+                     cookies are sent without the Secure flag; use https outside development \
+                     over a trusted network"
                 );
             }
         }

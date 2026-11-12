@@ -418,11 +418,10 @@ impl AuthConfig {
         self.public_url.scheme() == "https"
     }
 
-    /// Whether either the issuer or the public URL uses plain http, which validation
-    /// allows only with [`AuthConfig::allow_insecure_http`].
-    pub fn uses_insecure_http(&self) -> bool {
-        !self.is_https()
-            || url::Url::parse(&self.issuer_url).is_ok_and(|issuer| issuer.scheme() == "http")
+    /// Whether the issuer URL uses plain http, which validation allows only with
+    /// [`AuthConfig::allow_insecure_http`].
+    pub fn issuer_uses_http(&self) -> bool {
+        url::Url::parse(&self.issuer_url).is_ok_and(|issuer| issuer.scheme() == "http")
     }
 
     /// Reads the client secret from the process environment.
@@ -850,7 +849,7 @@ auth:
         assert_eq!(auth.scopes, ["openid", "profile", "email"]);
         assert_eq!(auth.session, SessionConfig::default());
         assert!(!auth.allow_insecure_http);
-        assert!(!auth.uses_insecure_http());
+        assert!(!auth.issuer_uses_http());
     }
 
     fn allowing_insecure_http(text: &str) -> String {
@@ -874,7 +873,7 @@ auth:
         let auth = auth(&allowing_insecure_http(&text));
         assert_eq!(auth.issuer_url, "http://id.example.com");
         assert!(auth.is_https());
-        assert!(auth.uses_insecure_http());
+        assert!(auth.issuer_uses_http());
     }
 
     #[test]
@@ -891,7 +890,7 @@ auth:
         let auth = auth(&allowing_insecure_http(&text));
         assert_eq!(auth.public_origin(), "http://100.64.0.5:5173");
         assert!(!auth.is_https());
-        assert!(auth.uses_insecure_http());
+        assert!(!auth.issuer_uses_http());
     }
 
     #[test]
@@ -899,7 +898,7 @@ auth:
         let auth = auth(&allowing_insecure_http(WITH_AUTH));
         assert!(auth.allow_insecure_http);
         assert!(auth.is_https());
-        assert!(!auth.uses_insecure_http());
+        assert!(!auth.issuer_uses_http());
     }
 
     #[test]

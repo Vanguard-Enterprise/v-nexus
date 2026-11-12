@@ -2,11 +2,15 @@ import { loginUrl } from "../api";
 import type { ApiError } from "../api";
 import { LOGIN_ERROR_PARAM, SIGNED_OUT_PARAM } from "../auth/session";
 
-const LOGIN_ERRORS: Record<string, string> = {
-  denied: "Sign-in was cancelled or refused by the identity provider.",
-  expired: "That sign-in expired or was started in another browser. Try again.",
-  failed: "Sign-in failed. Try again, and contact an administrator if it keeps failing.",
-};
+const FAILED_MESSAGE =
+  "Sign-in failed. Try again, and contact an administrator if it keeps failing.";
+
+// A Map, so codes such as `__proto__` from the URL cannot reach Object.prototype.
+const LOGIN_ERRORS = new Map<string, string>([
+  ["denied", "Sign-in was cancelled or refused by the identity provider."],
+  ["expired", "That sign-in expired or was started in another browser. Try again."],
+  ["failed", FAILED_MESSAGE],
+]);
 
 export function SignInPanel({ error, search }: { error: ApiError; search: string }) {
   const params = new URLSearchParams(search);
@@ -17,7 +21,7 @@ export function SignInPanel({ error, search }: { error: ApiError; search: string
   if (notConfigured) {
     detail = "Sign-in is not configured on this server. Add an auth section to its config file.";
   } else if (loginError !== null) {
-    detail = LOGIN_ERRORS[loginError] ?? LOGIN_ERRORS.failed ?? "";
+    detail = LOGIN_ERRORS.get(loginError) ?? FAILED_MESSAGE;
   } else if (params.has(SIGNED_OUT_PARAM)) {
     detail = "You have signed out.";
   } else {

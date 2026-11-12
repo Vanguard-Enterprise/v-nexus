@@ -103,4 +103,19 @@ describe("App", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("started in another browser");
     window.history.replaceState(null, "", "/");
   });
+
+  it.each(["__proto__", "constructor"])(
+    "treats the unknown login error %s as a failed sign-in",
+    async (code) => {
+      window.history.replaceState(null, "", `/?login_error=${code}`);
+      serve({
+        "GET /api/v1/auth/me": unauthorized,
+        "GET /api/v1/health": () => jsonResponse(HEALTH),
+      });
+      renderWithQuery(<App />);
+
+      expect(await screen.findByRole("alert")).toHaveTextContent("Sign-in failed");
+      window.history.replaceState(null, "", "/");
+    },
+  );
 });

@@ -20,6 +20,8 @@ PostgreSQL owns projects, environments, resource ownership, permission assignmen
 
 Platform setup comes from a validated, versioned configuration file. This includes database connectivity and identity-provider settings. The dashboard identifies file-managed settings and where to edit them. Database records must not silently override those settings.
 
+The installation `admin` role is one of those file-managed settings: the configuration file names an identity-provider claim and the values that grant it, and VN evaluates the claim at each sign-in. No database record grants or revokes it. Project roles (`viewer`, `operator`) are VN records assigned by installation admins. Browser sessions are PostgreSQL records referenced by an opaque, HttpOnly cookie; only a hash of the session token is stored.
+
 ### Observed infrastructure
 
 Agents report permitted Kubernetes resources, Docker containers, Linux host information, and health. PostgreSQL stores the latest inventory for browsing and filtering while a site is disconnected.

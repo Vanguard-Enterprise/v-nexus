@@ -7,6 +7,7 @@
 //! after printing that they were skipped.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use axum::body::Body;
@@ -165,7 +166,11 @@ struct Grant {
 
 struct MockInner {
     issuer: String,
-    signing_key: CoreRsaPrivateSigningKey,
+    /// Key ID of the RSA key ID tokens are signed with.
+    signing_kid: Mutex<String>,
+    /// Key ID of the RSA key published at the JWKS endpoint.
+    published_kid: Mutex<String>,
+    jwks_fetches: AtomicUsize,
     grants: Mutex<HashMap<String, Grant>>,
     userinfo: Mutex<HashMap<String, Value>>,
 }
@@ -183,16 +188,21 @@ fn rsa_pem() -> &'static str {
     })
 }
 
+/// The RSA key under key ID `kid`. Every key ID shares one key pair: verifiers look keys
+/// up by ID, so a new ID is enough to model a rotation.
+fn rsa_key(kid: &str) -> CoreRsaPrivateSigningKey {
+    CoreRsaPrivateSigningKey::from_pem(rsa_pem(), Some(JsonWebKeyId::new(kid.into()))).unwrap()
+}
+
 impl MockProvider {
     async fn start() -> Self {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let issuer = format!("http://{}", listener.local_addr().unwrap());
-        let signing_key =
-            CoreRsaPrivateSigningKey::from_pem(rsa_pem(), Some(JsonWebKeyId::new("k1".into())))
-                .unwrap();
         let provider = Self(Arc::new(MockInner {
             issuer,
-            signing_key,
+            signing_kid: Mutex::new("k1".into()),
+            published_kid: Mutex::new("k1".into()),
+            jwks_fetches: AtomicUsize::new(0),
             grants: Mutex::default(),
             userinfo: Mutex::default(),
         }));
@@ -246,6 +256,22 @@ impl MockProvider {
         (code, params["state"].clone())
     }
 
+    /// Replaces the signing key with a new one under key ID `kid`, as a provider rotating
+    /// its keys does.
+    fn rotate(&self, kid: &str) {
+        *self.0.signing_kid.lock().unwrap() = kid.into();
+        *self.0.published_kid.lock().unwrap() = kid.into();
+    }
+
+    /// Signs ID tokens with a key under `kid` that the JWKS endpoint never publishes.
+    fn sign_with_unpublished_key(&self, kid: &str) {
+        *self.0.signing_kid.lock().unwrap() = kid.into();
+    }
+
+    fn jwks_fetches(&self) -> usize {
+        self.0.jwks_fetches.load(Ordering::SeqCst)
+    }
+
     /// Changes the nonce the provider will put in the ID token for `code`.
     fn tamper_nonce(&self, code: &str) {
         self.0.grants.lock().unwrap().get_mut(code).unwrap().nonce = "forged".into();
@@ -268,7 +294,9 @@ async fn discovery(State(p): State<MockProvider>) -> Json<Value> {
 }
 
 async fn jwks(State(p): State<MockProvider>) -> Json<Value> {
-    Json(json!({ "keys": [p.0.signing_key.as_verification_key()] }))
+    p.0.jwks_fetches.fetch_add(1, Ordering::SeqCst);
+    let key = rsa_key(&p.0.published_kid.lock().unwrap());
+    Json(json!({ "keys": [key.as_verification_key()] }))
 }
 
 fn oauth_error(code: &str) -> Response {
@@ -322,9 +350,10 @@ async fn token(
         TestClaims { claims: extra },
     )
     .set_nonce(Some(Nonce::new(grant.nonce)));
+    let key = rsa_key(&p.0.signing_kid.lock().unwrap());
     let id_token = TestIdToken::new(
         claims,
-        &p.0.signing_key,
+        &key,
         CoreJwsSigningAlgorithm::RsaSsaPkcs1V15Sha256,
         Some(&AccessToken::new(access_token.clone())),
         None,
@@ -656,6 +685,51 @@ async fn callback_rejects_an_id_token_with_the_wrong_nonce() {
         .await
         .unwrap();
     assert_eq!(users, 0);
+
+    h.finish().await;
+}
+
+/// Number of sessions stored, revoked or not.
+async fn session_count(h: &Harness) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM sessions")
+        .fetch_one(&h.db.pool)
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn signing_key_rotation_refetches_keys_once() {
+    let h = harness!(Harness::start());
+    h.sign_in(alice()).await;
+    assert_eq!(h.provider.jwks_fetches(), 1);
+
+    // The cached keys predate the rotation, so the first token signed with the new key
+    // triggers one fetch, and later sign-ins use the refreshed keys.
+    h.provider.rotate("k2");
+    let token = h.sign_in(bob()).await;
+    assert_eq!(h.provider.jwks_fetches(), 2);
+    let me = h.get(&token, "/api/v1/auth/me").await;
+    assert_eq!(me.json["user"]["subject"], "bob");
+    h.sign_in(alice()).await;
+    assert_eq!(h.provider.jwks_fetches(), 2);
+
+    h.finish().await;
+}
+
+#[tokio::test]
+async fn id_token_signed_with_an_unpublished_key_is_rejected_after_one_refresh() {
+    let h = harness!(Harness::start());
+    h.sign_in(alice()).await;
+    assert_eq!(h.provider.jwks_fetches(), 1);
+
+    h.provider.sign_with_unpublished_key("never-published");
+    let login = h.start_login("/").await;
+    let (code, state) = h.provider.authorize(&login.location, bob());
+    let response = h.callback(&code, &state, Some(&login.login_cookie)).await;
+    assert_eq!(response.location(), "/?login_error=failed");
+    assert!(response.cookie(SESSION_COOKIE).is_none());
+    assert_eq!(h.provider.jwks_fetches(), 2);
+    assert_eq!(session_count(&h).await, 1);
 
     h.finish().await;
 }

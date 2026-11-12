@@ -13,17 +13,19 @@ use openidconnect::core::{
 };
 use openidconnect::{
     AccessTokenHash, AdditionalClaims, AsyncHttpClient, AuthenticationFlow, AuthorizationCode,
-    ClientId, ClientSecret, CsrfToken, EmptyExtraTokenFields, EndpointMaybeSet, EndpointNotSet,
-    EndpointSet, HttpRequest, HttpResponse, IdTokenFields, IssuerUrl, Nonce, OAuth2TokenResponse,
-    PkceCodeChallenge, PkceCodeVerifier, RedirectUrl, RequestTokenError, Scope,
-    StandardErrorResponse, StandardTokenResponse, TokenResponse,
+    ClaimsVerificationError, ClientId, ClientSecret, CsrfToken, EmptyExtraTokenFields,
+    EndpointMaybeSet, EndpointNotSet, EndpointSet, HttpRequest, HttpResponse, IdTokenFields,
+    IssuerUrl, Nonce, OAuth2TokenResponse, PkceCodeChallenge, PkceCodeVerifier, RedirectUrl,
+    RequestTokenError, Scope, SignatureVerificationError, StandardErrorResponse,
+    StandardTokenResponse, TokenResponse,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use vn_config::{AdminMapping, AuthConfig, Secret};
 
 /// How long discovered provider metadata and signing keys are reused before they are
-/// fetched again, so key rotation at the provider is picked up.
+/// fetched again, so key rotation at the provider is picked up. An ID token signed with a
+/// key missing from the cached set also triggers a fetch; see [`Oidc::refresh`].
 const DISCOVERY_TTL: Duration = Duration::from_secs(15 * 60);
 
 /// Time limit for each request to the provider.
@@ -159,6 +161,27 @@ impl Oidc {
         {
             return Ok(client.clone());
         }
+        self.discover(&mut cached).await
+    }
+
+    /// Discovers again because `stale` lacked the key an ID token was signed with, unless
+    /// the cache already holds a newer client. Concurrent callbacks that hit the same
+    /// rotation therefore share one fetch.
+    async fn refresh(&self, stale: &Arc<OidcClient>) -> Result<Arc<OidcClient>, OidcError> {
+        let mut cached = self.cached.lock().await;
+        if let Some((_, client)) = cached.as_ref()
+            && !Arc::ptr_eq(client, stale)
+        {
+            return Ok(client.clone());
+        }
+        self.discover(&mut cached).await
+    }
+
+    /// Fetches provider metadata and signing keys and stores the resulting client.
+    async fn discover(
+        &self,
+        cached: &mut Option<(Instant, Arc<OidcClient>)>,
+    ) -> Result<Arc<OidcClient>, OidcError> {
         let metadata = CoreProviderMetadata::discover_async(self.issuer.clone(), &self.http)
             .await
             .map_err(|err| OidcError::Discovery(error_chain(&err)))?;
@@ -212,15 +235,32 @@ impl Oidc {
             .map_err(|err| OidcError::TokenExchange(describe_token_error(&err)))?;
 
         let id_token = token.id_token().ok_or(OidcError::MissingIdToken)?;
-        let verifier = client.id_token_verifier();
-        let claims = id_token
-            .claims(&verifier, &Nonce::new(nonce.to_owned()))
-            .map_err(|err| OidcError::IdToken(err.to_string()))?;
+        let nonce = Nonce::new(nonce.to_owned());
+        let first = id_token.claims(&client.id_token_verifier(), &nonce);
+        let (client, claims) = match first {
+            // The provider may have rotated its signing key since the keys were cached.
+            // Verify the same ID token again with fresh keys; the code is already redeemed.
+            Err(ClaimsVerificationError::SignatureVerification(
+                SignatureVerificationError::NoMatchingKey,
+            )) => {
+                tracing::info!("ID token signed with an unknown key; fetching provider keys");
+                let client = self.refresh(&client).await?;
+                let claims = id_token
+                    .claims(&client.id_token_verifier(), &nonce)
+                    .map_err(|err| OidcError::IdToken(err.to_string()))?;
+                (client, claims)
+            }
+            other => (
+                client,
+                other.map_err(|err| OidcError::IdToken(err.to_string()))?,
+            ),
+        };
 
         if let Some(expected) = claims.access_token_hash() {
             let alg = id_token
                 .signing_alg()
                 .map_err(|err| OidcError::IdToken(err.to_string()))?;
+            let verifier = client.id_token_verifier();
             let key = id_token
                 .signing_key(&verifier)
                 .map_err(|err| OidcError::IdToken(err.to_string()))?;

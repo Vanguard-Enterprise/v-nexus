@@ -3,7 +3,8 @@
 //! The file is YAML with an explicit schema `version`. Unknown fields are rejected so that
 //! typos fail loudly instead of being ignored. Secrets are never stored in the file: the
 //! database connection URL is read from the environment variable named by
-//! `database.url_env`.
+//! `database.url_env`, and the OIDC client secret from the one named by
+//! `auth.client_secret_env`.
 
 use std::fmt;
 use std::net::SocketAddr;
@@ -21,6 +22,10 @@ pub const CONFIG_PATH_ENV: &str = "VN_CONFIG";
 pub const DEFAULT_CONFIG_PATH: &str = "vn.yaml";
 
 const DEFAULT_MAX_CONNECTIONS: u32 = 10;
+const DEFAULT_IDLE_TIMEOUT_MINUTES: u32 = 60;
+const DEFAULT_ABSOLUTE_TIMEOUT_MINUTES: u32 = 12 * 60;
+/// Upper bound on `auth.session.absolute_timeout_minutes` (30 days).
+pub const MAX_ABSOLUTE_TIMEOUT_MINUTES: u32 = 30 * 24 * 60;
 
 /// Top-level configuration file.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -29,6 +34,10 @@ pub struct Config {
     pub version: u32,
     pub server: ServerConfig,
     pub database: DatabaseConfig,
+    /// User sign-in. When omitted, nobody can sign in and every API route except health
+    /// answers 401.
+    #[serde(default)]
+    pub auth: Option<AuthConfig>,
 }
 
 /// HTTP server settings.
@@ -58,6 +67,77 @@ fn default_max_connections() -> u32 {
     DEFAULT_MAX_CONNECTIONS
 }
 
+/// OpenID Connect sign-in settings.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuthConfig {
+    /// OIDC issuer URL, exactly as the provider reports it in its `issuer` metadata (a
+    /// trailing slash matters). Provider metadata is discovered from
+    /// `<issuer_url>/.well-known/openid-configuration`.
+    pub issuer_url: String,
+    /// Client ID registered with the provider.
+    pub client_id: String,
+    /// Name of the environment variable holding the client secret.
+    pub client_secret_env: String,
+    /// Origin browsers use to reach VN, for example `https://vn.example.com`. The OIDC
+    /// redirect URI is `<public_url>/api/v1/auth/callback`, session cookies are marked
+    /// `Secure` when it uses https, and state-changing requests must come from this origin.
+    pub public_url: url::Url,
+    /// Scopes requested at sign-in. `openid` is always requested.
+    #[serde(default = "default_scopes")]
+    pub scopes: Vec<String>,
+    /// How installation administrators are recognized.
+    pub admin: AdminMapping,
+    #[serde(default)]
+    pub session: SessionConfig,
+}
+
+/// Maps an OIDC claim to the installation `admin` role.
+///
+/// A user is an administrator when the claim named by `claim`, read from the ID token or
+/// (when absent there) the userinfo response, contains any of `values`. The claim may be a
+/// string, a list of strings (a groups claim), or an object whose keys are role names (the
+/// Zitadel project roles claim).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdminMapping {
+    pub claim: String,
+    pub values: Vec<String>,
+}
+
+/// Browser session lifetime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionConfig {
+    /// A session ends after this many minutes without a request.
+    #[serde(default = "default_idle_timeout")]
+    pub idle_timeout_minutes: u32,
+    /// A session ends this many minutes after sign-in, regardless of activity.
+    #[serde(default = "default_absolute_timeout")]
+    pub absolute_timeout_minutes: u32,
+}
+
+impl Default for SessionConfig {
+    fn default() -> Self {
+        Self {
+            idle_timeout_minutes: DEFAULT_IDLE_TIMEOUT_MINUTES,
+            absolute_timeout_minutes: DEFAULT_ABSOLUTE_TIMEOUT_MINUTES,
+        }
+    }
+}
+
+fn default_scopes() -> Vec<String> {
+    ["openid", "profile", "email"].map(String::from).to_vec()
+}
+
+fn default_idle_timeout() -> u32 {
+    DEFAULT_IDLE_TIMEOUT_MINUTES
+}
+
+fn default_absolute_timeout() -> u32 {
+    DEFAULT_ABSOLUTE_TIMEOUT_MINUTES
+}
+
 /// Errors from loading, validating, or resolving configuration.
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
@@ -80,10 +160,10 @@ pub enum ConfigError {
         field: &'static str,
         message: String,
     },
-    #[error("environment variable `{var}` named by `database.url_env` is not set")]
-    EnvVarMissing { var: String },
-    #[error("environment variable `{var}` named by `database.url_env` is empty")]
-    EnvVarEmpty { var: String },
+    #[error("environment variable `{var}` named by `{field}` is not set")]
+    EnvVarMissing { field: &'static str, var: String },
+    #[error("environment variable `{var}` named by `{field}` is empty")]
+    EnvVarEmpty { field: &'static str, var: String },
     /// The message never includes the URL or any parameter value, since they may hold
     /// credentials.
     #[error("database URL in environment variable `{var}` is invalid: {message}")]
@@ -140,7 +220,173 @@ impl Config {
                 message: "must be at least 1".into(),
             });
         }
+        if let Some(auth) = &self.auth {
+            auth.validate()?;
+        }
         Ok(())
+    }
+}
+
+impl AuthConfig {
+    fn validate(&self) -> Result<(), ConfigError> {
+        let invalid = |field, message: &str| ConfigError::Invalid {
+            field,
+            message: message.into(),
+        };
+        let issuer = url::Url::parse(&self.issuer_url).map_err(|err| ConfigError::Invalid {
+            field: "auth.issuer_url",
+            message: format!("not a valid URL ({err})"),
+        })?;
+        if !matches!(issuer.scheme(), "http" | "https") {
+            return Err(invalid(
+                "auth.issuer_url",
+                "scheme must be `http` or `https`",
+            ));
+        }
+        if issuer.query().is_some() || issuer.fragment().is_some() {
+            return Err(invalid(
+                "auth.issuer_url",
+                "must not have a query string or fragment",
+            ));
+        }
+        if self.client_id.trim().is_empty() {
+            return Err(invalid("auth.client_id", "must not be empty"));
+        }
+        if !is_env_var_name(&self.client_secret_env) {
+            return Err(ConfigError::Invalid {
+                field: "auth.client_secret_env",
+                message: format!(
+                    "`{}` is not a valid environment variable name \
+                     (use letters, digits, and underscores, not starting with a digit)",
+                    self.client_secret_env
+                ),
+            });
+        }
+        let public = &self.public_url;
+        if !matches!(public.scheme(), "http" | "https") {
+            return Err(invalid(
+                "auth.public_url",
+                "scheme must be `http` or `https`",
+            ));
+        }
+        if public.path() != "/"
+            || public.query().is_some()
+            || public.fragment().is_some()
+            || !public.username().is_empty()
+            || public.password().is_some()
+        {
+            return Err(invalid(
+                "auth.public_url",
+                "must be an origin such as `https://vn.example.com`, without a path, \
+                 query, fragment, or credentials",
+            ));
+        }
+        for scope in &self.scopes {
+            if scope.is_empty() || scope.chars().any(|c| c.is_whitespace() || c == '"') {
+                return Err(ConfigError::Invalid {
+                    field: "auth.scopes",
+                    message: format!("`{scope}` is not a valid scope"),
+                });
+            }
+        }
+        if self.admin.claim.trim().is_empty() {
+            return Err(invalid("auth.admin.claim", "must not be empty"));
+        }
+        if self.admin.values.is_empty() {
+            return Err(invalid(
+                "auth.admin.values",
+                "must list at least one value that grants the admin role",
+            ));
+        }
+        if self.admin.values.iter().any(|v| v.is_empty()) {
+            return Err(invalid("auth.admin.values", "values must not be empty"));
+        }
+        let session = &self.session;
+        if session.idle_timeout_minutes == 0 {
+            return Err(invalid(
+                "auth.session.idle_timeout_minutes",
+                "must be at least 1",
+            ));
+        }
+        if session.absolute_timeout_minutes > MAX_ABSOLUTE_TIMEOUT_MINUTES {
+            return Err(ConfigError::Invalid {
+                field: "auth.session.absolute_timeout_minutes",
+                message: format!("must be at most {MAX_ABSOLUTE_TIMEOUT_MINUTES} (30 days)"),
+            });
+        }
+        if session.absolute_timeout_minutes < session.idle_timeout_minutes {
+            return Err(invalid(
+                "auth.session.absolute_timeout_minutes",
+                "must be at least `auth.session.idle_timeout_minutes`",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Origin of [`AuthConfig::public_url`] in the form browsers send in `Origin` headers,
+    /// for example `https://vn.example.com`.
+    pub fn public_origin(&self) -> String {
+        self.public_url.origin().ascii_serialization()
+    }
+
+    /// Redirect URI registered with the provider.
+    pub fn redirect_url(&self) -> String {
+        format!("{}/api/v1/auth/callback", self.public_origin())
+    }
+
+    /// Whether the public URL uses https, so cookies must be marked `Secure`.
+    pub fn is_https(&self) -> bool {
+        self.public_url.scheme() == "https"
+    }
+
+    /// Reads the client secret from the process environment.
+    pub fn resolve_client_secret(&self) -> Result<Secret, ConfigError> {
+        self.resolve_client_secret_with(|name| {
+            std::env::var_os(name).map(|v| v.to_string_lossy().into())
+        })
+    }
+
+    /// Resolves the client secret using `lookup` in place of the process environment.
+    pub fn resolve_client_secret_with(
+        &self,
+        lookup: impl FnOnce(&str) -> Option<String>,
+    ) -> Result<Secret, ConfigError> {
+        let field = "auth.client_secret_env";
+        let var = &self.client_secret_env;
+        match lookup(var) {
+            None => Err(ConfigError::EnvVarMissing {
+                field,
+                var: var.clone(),
+            }),
+            Some(value) if value.trim().is_empty() => Err(ConfigError::EnvVarEmpty {
+                field,
+                var: var.clone(),
+            }),
+            Some(value) => Ok(Secret(value)),
+        }
+    }
+}
+
+/// A secret read from the environment. `Debug` and `Display` redact it.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Secret(String);
+
+impl Secret {
+    /// Returns the secret value. Do not log it.
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for Secret {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Secret(<redacted>)")
+    }
+}
+
+impl fmt::Display for Secret {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("<redacted>")
     }
 }
 
@@ -155,12 +401,17 @@ impl DatabaseConfig {
         &self,
         lookup: impl FnOnce(&str) -> Option<String>,
     ) -> Result<DatabaseUrl, ConfigError> {
+        let field = "database.url_env";
         let var = &self.url_env;
         match lookup(var) {
-            None => Err(ConfigError::EnvVarMissing { var: var.clone() }),
-            Some(value) if value.trim().is_empty() => {
-                Err(ConfigError::EnvVarEmpty { var: var.clone() })
-            }
+            None => Err(ConfigError::EnvVarMissing {
+                field,
+                var: var.clone(),
+            }),
+            Some(value) if value.trim().is_empty() => Err(ConfigError::EnvVarEmpty {
+                field,
+                var: var.clone(),
+            }),
             Some(value) => {
                 check_database_url(&value).map_err(|message| ConfigError::DatabaseUrlInvalid {
                     var: var.clone(),
@@ -296,8 +547,32 @@ database:
   max_connections: 5
 ";
 
+    const WITH_AUTH: &str = "\
+version: 1
+server:
+  listen: 0.0.0.0:8080
+database:
+  url_env: VN_DATABASE_URL
+auth:
+  issuer_url: https://id.example.com
+  client_id: \"1234@vn\"
+  client_secret_env: VN_OIDC_CLIENT_SECRET
+  public_url: https://vn.example.com
+  scopes: [openid, profile, email, groups]
+  admin:
+    claim: groups
+    values: [vn-admins]
+  session:
+    idle_timeout_minutes: 30
+    absolute_timeout_minutes: 480
+";
+
     fn err(text: &str) -> String {
         Config::from_yaml(text).unwrap_err().to_string()
+    }
+
+    fn auth(text: &str) -> AuthConfig {
+        Config::from_yaml(text).unwrap().auth.unwrap()
     }
 
     #[test]
@@ -409,7 +684,7 @@ database:
 
         let missing = config.database.resolve_url_with(|_| None).unwrap_err();
         assert!(
-            matches!(missing, ConfigError::EnvVarMissing { ref var } if var == "VN_DATABASE_URL")
+            matches!(missing, ConfigError::EnvVarMissing { ref var, .. } if var == "VN_DATABASE_URL")
         );
         assert!(missing.to_string().contains("VN_DATABASE_URL"));
 
@@ -441,6 +716,181 @@ database:
 
         resolve("postgresql://vn:pw@db:5432/vn?sslmode=require&application_name=vn&options[search_path]=vn")
             .unwrap();
+    }
+
+    #[test]
+    fn auth_is_optional() {
+        assert_eq!(Config::from_yaml(VALID).unwrap().auth, None);
+    }
+
+    #[test]
+    fn parses_auth_section() {
+        let auth = auth(WITH_AUTH);
+        assert_eq!(auth.issuer_url, "https://id.example.com");
+        assert_eq!(auth.client_id, "1234@vn");
+        assert_eq!(auth.client_secret_env, "VN_OIDC_CLIENT_SECRET");
+        assert_eq!(auth.public_origin(), "https://vn.example.com");
+        assert_eq!(
+            auth.redirect_url(),
+            "https://vn.example.com/api/v1/auth/callback"
+        );
+        assert!(auth.is_https());
+        assert_eq!(auth.scopes, ["openid", "profile", "email", "groups"]);
+        assert_eq!(
+            auth.admin,
+            AdminMapping {
+                claim: "groups".into(),
+                values: vec!["vn-admins".into()],
+            }
+        );
+        assert_eq!(
+            auth.session,
+            SessionConfig {
+                idle_timeout_minutes: 30,
+                absolute_timeout_minutes: 480,
+            }
+        );
+    }
+
+    #[test]
+    fn auth_optional_fields_have_defaults() {
+        let text = WITH_AUTH
+            .replace("  scopes: [openid, profile, email, groups]\n", "")
+            .replace(
+                "  session:\n    idle_timeout_minutes: 30\n    absolute_timeout_minutes: 480\n",
+                "",
+            )
+            .replace("https://vn.example.com", "http://10.0.0.5:5173");
+        let auth = auth(&text);
+        assert_eq!(auth.scopes, ["openid", "profile", "email"]);
+        assert_eq!(auth.session, SessionConfig::default());
+        assert_eq!(auth.public_origin(), "http://10.0.0.5:5173");
+        assert!(!auth.is_https());
+    }
+
+    #[test]
+    fn issuer_url_is_kept_verbatim() {
+        let auth = auth(&WITH_AUTH.replace("https://id.example.com", "https://id.example.com/"));
+        assert_eq!(auth.issuer_url, "https://id.example.com/");
+    }
+
+    #[test]
+    fn rejects_unknown_auth_fields() {
+        let message =
+            err(&WITH_AUTH.replace("  client_id:", "  client_secret: oops\n  client_id:"));
+        assert!(
+            message.contains("unknown field `client_secret`"),
+            "{message}"
+        );
+
+        let message =
+            err(&WITH_AUTH.replace("    claim: groups", "    claim: groups\n    role: x"));
+        assert!(message.contains("unknown field `role`"), "{message}");
+    }
+
+    #[test]
+    fn requires_admin_mapping() {
+        let message =
+            err(&WITH_AUTH.replace("  admin:\n    claim: groups\n    values: [vn-admins]\n", ""));
+        assert!(message.contains("missing field `admin`"), "{message}");
+    }
+
+    #[test]
+    fn names_invalid_auth_field() {
+        let cases = [
+            ("https://id.example.com", "not a url", "`auth.issuer_url`"),
+            (
+                "https://id.example.com",
+                "ftp://id.example.com",
+                "`auth.issuer_url`",
+            ),
+            (
+                "https://id.example.com",
+                "https://id.example.com/?x=1",
+                "`auth.issuer_url`",
+            ),
+            ("\"1234@vn\"", "\" \"", "`auth.client_id`"),
+            (
+                "VN_OIDC_CLIENT_SECRET",
+                "1SECRET",
+                "`auth.client_secret_env`",
+            ),
+            (
+                "https://vn.example.com",
+                "https://vn.example.com/vn",
+                "`auth.public_url`",
+            ),
+            (
+                "https://vn.example.com",
+                "https://u:p@vn.example.com",
+                "`auth.public_url`",
+            ),
+            (
+                "https://vn.example.com",
+                "ws://vn.example.com",
+                "`auth.public_url`",
+            ),
+            (
+                "[openid, profile, email, groups]",
+                "[openid, \"two words\"]",
+                "`auth.scopes`",
+            ),
+            ("claim: groups", "claim: \"\"", "`auth.admin.claim`"),
+            ("values: [vn-admins]", "values: []", "`auth.admin.values`"),
+            (
+                "values: [vn-admins]",
+                "values: [\"\"]",
+                "`auth.admin.values`",
+            ),
+            (
+                "idle_timeout_minutes: 30",
+                "idle_timeout_minutes: 0",
+                "`auth.session.idle_timeout_minutes`",
+            ),
+            (
+                "absolute_timeout_minutes: 480",
+                "absolute_timeout_minutes: 10",
+                "`auth.session.absolute_timeout_minutes`",
+            ),
+            (
+                "absolute_timeout_minutes: 480",
+                "absolute_timeout_minutes: 50000",
+                "`auth.session.absolute_timeout_minutes`",
+            ),
+        ];
+        for (from, to, field) in cases {
+            let text = WITH_AUTH.replace(from, to);
+            assert_ne!(text, WITH_AUTH, "{from} not found");
+            let message = err(&text);
+            assert!(message.contains(field), "{to}: {message}");
+        }
+    }
+
+    #[test]
+    fn resolves_client_secret_from_env_without_revealing_it() {
+        let auth = auth(WITH_AUTH);
+        let secret = auth
+            .resolve_client_secret_with(|name| {
+                assert_eq!(name, "VN_OIDC_CLIENT_SECRET");
+                Some("s3cr3t-value".into())
+            })
+            .unwrap();
+        assert_eq!(secret.expose(), "s3cr3t-value");
+        assert!(!format!("{secret:?} {secret} {auth:?}").contains("s3cr3t"));
+
+        let missing = auth.resolve_client_secret_with(|_| None).unwrap_err();
+        assert!(matches!(
+            missing,
+            ConfigError::EnvVarMissing {
+                field: "auth.client_secret_env",
+                ..
+            }
+        ));
+        assert!(missing.to_string().contains("VN_OIDC_CLIENT_SECRET"));
+        assert!(matches!(
+            auth.resolve_client_secret_with(|_| Some(" ".into())),
+            Err(ConfigError::EnvVarEmpty { .. })
+        ));
     }
 
     #[test]

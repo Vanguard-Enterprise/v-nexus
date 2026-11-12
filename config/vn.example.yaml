@@ -17,3 +17,34 @@ database:
   url_env: VN_DATABASE_URL
   # Maximum pooled connections. Optional, defaults to 10.
   max_connections: 10
+
+# User sign-in through an OpenID Connect provider such as Zitadel. Optional: without this
+# section nobody can sign in, and every API route except /api/v1/health answers 401.
+auth:
+  # Issuer URL exactly as the provider reports it (a trailing slash matters).
+  issuer_url: https://zitadel.example.com
+  # Client ID of a confidential web application using the authorization code flow
+  # with PKCE.
+  client_id: "000000000000000000@vanguard-nexus"
+  # Name of the environment variable that holds the client secret. The secret itself
+  # never goes in this file and is never logged.
+  client_secret_env: VN_OIDC_CLIENT_SECRET
+  # Origin browsers use to reach VN. Register <public_url>/api/v1/auth/callback as the
+  # redirect URI. With the Vite dev server, use its address, for example
+  # http://<host>:5173. Cookies are marked Secure when this uses https.
+  public_url: http://localhost:5173
+  # Scopes requested at sign-in. Optional, defaults to [openid, profile, email]. Add
+  # any scope your provider needs to release the admin claim, such as `groups`.
+  scopes: [openid, profile, email]
+  # Users whose `claim` contains any of `values` get the installation admin role at
+  # sign-in. The claim is read from the ID token, or from the userinfo response when
+  # the ID token lacks it. It may be a string, a list (a groups claim), or an object
+  # keyed by role name (the Zitadel project roles claim). Changes at the provider
+  # apply at the user's next sign-in.
+  admin:
+    claim: "urn:zitadel:iam:org:project:roles"
+    values: [vn-admin]
+  # Optional session lifetime in minutes. Defaults: 60 idle, 720 (12 hours) absolute.
+  session:
+    idle_timeout_minutes: 60
+    absolute_timeout_minutes: 720

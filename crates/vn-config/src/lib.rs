@@ -27,6 +27,47 @@ const DEFAULT_ABSOLUTE_TIMEOUT_MINUTES: u32 = 12 * 60;
 /// Upper bound on `auth.session.absolute_timeout_minutes` (30 days).
 pub const MAX_ABSOLUTE_TIMEOUT_MINUTES: u32 = 30 * 24 * 60;
 
+/// The `admin.claim` value that matches users by their ID token subject.
+pub const SUBJECT_CLAIM: &str = "sub";
+
+/// Claims the OIDC client parses into dedicated fields (the registered ID token claims
+/// and the OpenID Connect standard profile claims). They never reach the admin lookup,
+/// and the profile claims are user-editable at many providers, so `admin.claim` rejects
+/// them. Matched on the name before any `#` language tag, as the client does.
+const NON_ADMIN_CLAIMS: &[&str] = &[
+    "iss",
+    "aud",
+    "exp",
+    "iat",
+    "auth_time",
+    "nonce",
+    "acr",
+    "amr",
+    "azp",
+    "at_hash",
+    "c_hash",
+    "name",
+    "given_name",
+    "family_name",
+    "middle_name",
+    "nickname",
+    "preferred_username",
+    "profile",
+    "picture",
+    "website",
+    "email",
+    "email_verified",
+    "gender",
+    "birthday",
+    "birthdate",
+    "zoneinfo",
+    "locale",
+    "phone_number",
+    "phone_number_verified",
+    "address",
+    "updated_at",
+];
+
 /// Top-level configuration file.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -104,6 +145,10 @@ pub struct AuthConfig {
 /// (when absent there) the userinfo response, contains any of `values`. The claim may be a
 /// string, a list of strings (a groups claim), or an object whose keys are role names (the
 /// Zitadel project roles claim).
+///
+/// `claim: sub` instead compares the verified ID token subject against `values`, which
+/// suits bootstrapping the first administrator. The other registered and standard
+/// profile claims (`email`, `preferred_username`, and so on) are rejected.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AdminMapping {
@@ -313,6 +358,18 @@ impl AuthConfig {
         }
         if self.admin.claim.trim().is_empty() {
             return Err(invalid("auth.admin.claim", "must not be empty"));
+        }
+        let claim = self.admin.claim.as_str();
+        let base = claim.split_once('#').map_or(claim, |(base, _)| base);
+        if claim != SUBJECT_CLAIM && (base == SUBJECT_CLAIM || NON_ADMIN_CLAIMS.contains(&base)) {
+            return Err(ConfigError::Invalid {
+                field: "auth.admin.claim",
+                message: format!(
+                    "`{claim}` cannot be used for the admin mapping because it is mutable \
+                     or not an authorization claim; use a role or groups claim, or `sub` \
+                     to match the user's subject"
+                ),
+            });
         }
         if self.admin.values.is_empty() {
             return Err(invalid(
@@ -940,6 +997,43 @@ auth:
             assert_ne!(text, WITH_AUTH, "{from} not found");
             let message = err(&text);
             assert!(message.contains(field), "{to}: {message}");
+        }
+    }
+
+    #[test]
+    fn admin_claim_rejects_standard_claims() {
+        for claim in [
+            "email",
+            "preferred_username",
+            "name",
+            "name#en",
+            "email_verified",
+            "iss",
+            "aud",
+            "amr",
+            "sub#en",
+        ] {
+            let text = WITH_AUTH.replace("claim: groups", &format!("claim: \"{claim}\""));
+            let message = err(&text);
+            assert!(message.contains("`auth.admin.claim`"), "{claim}: {message}");
+            assert!(
+                message.contains("cannot be used for the admin mapping"),
+                "{claim}: {message}"
+            );
+            assert!(message.contains("`sub`"), "{claim}: {message}");
+        }
+    }
+
+    #[test]
+    fn admin_claim_accepts_sub_and_custom_claims() {
+        for claim in [
+            "sub",
+            "groups",
+            "roles",
+            "urn:zitadel:iam:org:project:roles",
+        ] {
+            let text = WITH_AUTH.replace("claim: groups", &format!("claim: \"{claim}\""));
+            assert_eq!(auth(&text).admin.claim, claim);
         }
     }
 

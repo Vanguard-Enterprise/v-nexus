@@ -427,10 +427,12 @@ struct Harness {
 
 impl Harness {
     async fn start() -> Option<Self> {
-        Self::start_with_session("").await
+        Self::start_with(&format!("{{claim: groups, values: [{ADMIN_GROUP}]}}"), "").await
     }
 
-    async fn start_with_session(session_yaml: &str) -> Option<Self> {
+    /// Starts with `admin_yaml` as the `auth.admin` mapping and `session_yaml` appended
+    /// to the `auth` block.
+    async fn start_with(admin_yaml: &str, session_yaml: &str) -> Option<Self> {
         let db = TestDb::create().await?;
         let provider = MockProvider::start().await;
         let config = vn_config::Config::from_yaml(&format!(
@@ -444,7 +446,7 @@ auth:
   public_url: {PUBLIC_ORIGIN}
   allow_insecure_http: true
   scopes: [openid, profile, email, groups]
-  admin: {{claim: groups, values: [{ADMIN_GROUP}]}}
+  admin: {admin_yaml}
 {session_yaml}",
             issuer = provider.issuer(),
         ))
@@ -828,8 +830,26 @@ async fn admin_role_can_come_from_userinfo() {
 }
 
 #[tokio::test]
+async fn admin_role_can_come_from_the_subject() {
+    // Bob is not in the admin group, so only the subject can make him an admin.
+    let h = harness!(Harness::start_with("{claim: sub, values: [bob]}", ""));
+    let token = h.sign_in(bob()).await;
+    let me = h.get(&token, "/api/v1/auth/me").await;
+    assert_eq!(me.json["user"]["subject"], "bob");
+    assert_eq!(me.json["installation_roles"], json!(["admin"]));
+
+    // Alice is in the admin group, which this mapping ignores.
+    let token = h.sign_in(alice()).await;
+    let me = h.get(&token, "/api/v1/auth/me").await;
+    assert_eq!(me.json["installation_roles"], json!([]));
+
+    h.finish().await;
+}
+
+#[tokio::test]
 async fn sessions_end_after_idle_and_absolute_timeouts() {
-    let h = harness!(Harness::start_with_session(
+    let h = harness!(Harness::start_with(
+        &format!("{{claim: groups, values: [{ADMIN_GROUP}]}}"),
         "  session: {idle_timeout_minutes: 5, absolute_timeout_minutes: 60}\n"
     ));
     let token = h.sign_in(alice()).await;

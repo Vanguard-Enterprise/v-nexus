@@ -21,7 +21,7 @@ use openidconnect::{
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
-use vn_config::{AdminMapping, AuthConfig, Secret};
+use vn_config::{AdminMapping, AuthConfig, SUBJECT_CLAIM, Secret};
 
 /// How long discovered provider metadata and signing keys are reused before they are
 /// fetched again, so key rotation at the provider is picked up. An ID token signed with a
@@ -38,8 +38,8 @@ const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 const MAX_EMAIL_CHARS: usize = 320;
 const MAX_NAME_CHARS: usize = 200;
 
-/// Every claim not covered by the standard set, so the admin claim can be read whatever
-/// its name.
+/// Every claim not covered by the standard set, so a custom admin claim can be read
+/// whatever its name.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub(crate) struct ExtraClaims {
     #[serde(flatten)]
@@ -283,11 +283,17 @@ impl Oidc {
         }
 
         let subject = claims.subject().clone();
-        let mut installation_admin = claims
-            .additional_claims()
-            .claims
-            .get(&self.admin.claim)
-            .map(|value| claim_grants(value, &self.admin.values));
+        // The client parses `sub` into a dedicated field, so it never appears among the
+        // additional claims. Config validation rejects the other standard claims.
+        let mut installation_admin = if self.admin.claim == SUBJECT_CLAIM {
+            Some(self.admin.values.iter().any(|v| v == subject.as_str()))
+        } else {
+            claims
+                .additional_claims()
+                .claims
+                .get(&self.admin.claim)
+                .map(|value| claim_grants(value, &self.admin.values))
+        };
 
         // Some providers (Zitadel by default) put role claims only in the userinfo response.
         if installation_admin.is_none()

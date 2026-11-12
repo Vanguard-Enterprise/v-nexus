@@ -45,11 +45,13 @@ auth:
   # Users whose `claim` contains any of `values` get the installation admin role at
   # sign-in. The claim is read from the ID token, or from the userinfo response when
   # the ID token lacks it. It may be a string, a list (a groups claim), or an object
-  # keyed by role name (the Zitadel project roles claim). Changes at the provider
-  # apply at the user's next sign-in. Removing the role at the provider does not end
-  # existing sessions: each keeps the admin role it was issued with until it is signed
-  # out or reaches its idle or absolute timeout. Keep `absolute_timeout_minutes` short
-  # where that matters.
+  # keyed by role name (the Zitadel project roles claim). `claim: sub` instead lists
+  # subjects in `values`, which is a way to name the first admin. Other standard
+  # claims, such as `email` or `preferred_username`, are rejected because users can
+  # often change them. Changes at the provider apply at the user's next sign-in.
+  # Removing the role at the provider does not end existing sessions: each keeps the
+  # admin role it was issued with until it is signed out or reaches its idle or
+  # absolute timeout. Keep `absolute_timeout_minutes` short where that matters.
   admin:
     claim: "urn:zitadel:iam:org:project:roles"
     values: [vn-admin]

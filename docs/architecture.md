@@ -46,7 +46,7 @@ Prefer secret references to OpenBao or another configured provider. Exclude secr
 
 Use Kubernetes list/watch through kube-rs for the cluster agent. The agent-to-server protocol must also handle reconnects, duplicate observations, and interrupted synchronization.
 
-A reconnect starts a complete inventory reconciliation. Only a successfully completed snapshot of a known collection scope may establish that previously observed resources are missing. An incomplete snapshot or collection permission failure must not mark those resources deleted. Version observations so delayed updates cannot replace newer state.
+A reconnect starts a complete inventory reconciliation. Only a successfully completed snapshot of a known collection scope may establish that previously observed resources are missing. A resource listed in that snapshot counts as present even when its content is unchanged. An incomplete snapshot or collection permission failure must not mark those resources deleted. Version observations so delayed updates cannot replace newer state. The sync epoch that orders observations belongs to the source record (the cluster record for a cluster agent), so ordering survives agent replacement.
 
 Persist management requests as jobs before dispatch. Design retries and agent result reporting to tolerate duplicate delivery, with explicit handling for operations whose outcome is unknown after a disconnect.
 
@@ -56,7 +56,7 @@ The [agent protocol sketch](agent-protocol.md) describes connection setup, messa
 
 ### Agent identity
 
-Decision: each agent generates an Ed25519 keypair locally and registers the public key at enrollment. To connect, the agent signs a single-use server challenge and receives a short-lived session token (15 minutes), which it presents when opening the agent channel. The token only authorizes opening connections. An open connection stays authorized while the agent remains active. The private key never leaves the agent. The server stores only public keys and hashes of session tokens.
+Decision: each agent generates an Ed25519 keypair locally and registers the public key at enrollment. To connect, the agent signs a stateless, single-use server challenge and receives a short-lived session token (15 minutes), which it presents when opening the agent channel. The token only authorizes opening connections. An open connection stays authorized while the agent remains active. The private key never leaves the agent. The server stores only public keys, hashes of session tokens, and the IDs of consumed challenges until they expire. Challenges carry a server-keyed MAC instead of being stored, so the unauthenticated challenge endpoint writes nothing. The challenge, session, and enrollment endpoints are rate-limited.
 
 Rationale:
 
@@ -75,6 +75,7 @@ Rejected alternatives:
 - A user with permission to register clusters in a project creates an enrollment token for that project. Installation admins hold this permission in every project. Role names and grants come from the user access design.
 - A token is a random 256-bit secret with a recognizable prefix and a public token ID. It is shown once. The server stores the token ID, a SHA-256 hash of the secret, the scope, the creator, and the creation, expiry, use, and revocation times. Expiry defaults to 1 hour, with a maximum of 24 hours.
 - A token is single-use and scoped to a project, an agent kind, and a target: a new cluster with a given display name, or an existing cluster record when replacing a lost or revoked agent. An unused token can be revoked.
+- A cluster has one active agent at a time. A replacement enrollment revokes the previous agent, if it is still active, in the same transaction. The sync epoch counter stays on the cluster record and keeps increasing, so the replacement's observations order after the previous agent's.
 - At enrollment the agent proves it holds the token and the private key: it sends the token, its public key, and a signature over the token ID, public key, and installation ID. It also reports its agent version, supported protocol versions, and a cluster fingerprint (the `kube-system` namespace UID). The fingerprint is a claim, not proof. The server records it and rejects later connections, and replacement enrollments for an existing cluster, that report a different fingerprint.
 - The token is consumed in the same transaction that creates the agent record, by a conditional update on an unused, unexpired, unrevoked token. Failed attempts are rate-limited and audited.
 - The server records the agent ID, kind, project, cluster, public key with a key ID, cluster fingerprint, agent version, enrolling token and its creator, enrollment time, and source address (resolved through configured trusted proxies). The response returns the agent ID, installation ID, and cluster ID. The cluster agent stores these with its private key in a Kubernetes Secret in its own namespace, readable only by its service account.
@@ -107,15 +108,43 @@ Rejected alternatives:
 
 ### Open questions
 
+Proposed defaults below are the owner's provisional answers. The questions stay open until confirmed.
+
 1. Should the enrollment bundle (server URL and token) also carry a server CA fingerprint for installations with a private or self-signed CA, or should the agent rely only on a configured CA bundle?
+
+   Proposed default: an optional CA fingerprint in the enrollment bundle.
+
 2. For the first milestone, should project operators be able to create enrollment tokens, or only installation admins?
+
+   Proposed default: only installation admins for the first milestone.
+
 3. Are the proposed token expiry (1 hour default, 24 hours maximum) and session lifetime (15 minutes) acceptable? Multi-use tokens for fleet installs are left out until Docker and Linux agents need them.
+
+   Proposed default: accept a 1-hour default and 24-hour maximum token expiry, and 15-minute sessions.
+
 4. What is the default key rotation period (proposed: 90 days), and should admins be able to force a rotation?
+
+   Proposed default: 90 days, and admins can force a rotation.
+
 5. Is a 30-second worst-case bound for closing revoked connections acceptable? A shorter bound costs more database checks per connection.
+
+   Proposed default: accept 30 seconds.
+
 6. Should the first protocol version use JSON text frames (proposed, for debuggability) or a binary encoding from the start?
+
+   Proposed default: JSON for version 1.
+
 7. Is running more than one server replica in scope for the first release? The design coordinates through PostgreSQL and works with one replica either way.
+
+   Proposed default: a single replica for the first release. The design stays compatible with multiple replicas.
+
 8. What is the minimum supported Kubernetes version? Resource version ordering is guaranteed only on 1.35 and later. Older clusters rely on VN sequence numbers alone.
+
+   Still open for the owner.
+
 9. When a collection's scope shrinks, should resources outside the new scope be marked as no longer collected (proposed) or removed from inventory?
+
+   Proposed default: mark them as no longer collected.
 
 ## First implementation milestone
 

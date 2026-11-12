@@ -10,11 +10,17 @@ The agent opens a connection in three requests. All requests go to the configure
 
 | Step | Request | Result |
 | --- | --- | --- |
-| 1 | `POST /api/v1/agent/auth/challenge` with the agent ID | A challenge ID and a random 32-byte nonce, valid for 60 seconds and usable once. |
-| 2 | `POST /api/v1/agent/auth/session` with the agent ID, key ID, challenge ID, and signature | A session token valid for 15 minutes. |
+| 1 | `POST /api/v1/agent/auth/challenge` with the agent ID | A challenge ID, a random 32-byte nonce, an expiry 60 seconds ahead, and a MAC. The server stores nothing. |
+| 2 | `POST /api/v1/agent/auth/session` with the agent ID, key ID, the challenge fields, and a signature | A session token valid for 15 minutes. |
 | 3 | `GET /api/v1/agent/connect` with `Authorization: Bearer <session token>` and `Sec-WebSocket-Protocol: vn-agent.v1` | A WebSocket connection. |
 
-The challenge endpoint answers for unknown agent IDs too, so it does not reveal which agents exist. The signature covers a domain-separated message:
+Challenges are stateless. The MAC is HMAC-SHA256 over the agent ID, challenge ID, nonce, and expiry, keyed with a challenge key from server configuration that all server replicas share. The challenge endpoint answers for unknown agent IDs too and writes nothing, so it does not reveal which agents exist and gives unauthenticated clients no write path.
+
+The session endpoint checks the MAC and the expiry before it verifies the signature. It enforces single use only when it creates a session: the same transaction inserts the challenge ID into a table of consumed challenges with a unique constraint. Rows are deleted once their challenge has expired. Rotating the challenge key invalidates only outstanding challenges.
+
+The challenge, session, and enrollment endpoints are rate-limited per source address, resolved through configured trusted proxies.
+
+The signature covers a domain-separated message:
 
 ```text
 "vn-agent-session-v1" 0x00 installation_id agent_id key_id challenge_id nonce
@@ -61,7 +67,7 @@ Receivers ignore unknown fields. A receiver that gets an unknown message type re
 1. The server sends `welcome` with the connection ID, the sync epoch, the heartbeat interval, the acknowledgement window, the message size limit, and its capabilities.
 2. The agent sends `hello` with its version, capabilities, cluster fingerprint, and, once jobs exist, its unfinished and unacknowledged jobs.
 
-The server increments a per-agent sync epoch in PostgreSQL each time it accepts a connection. A new connection supersedes any older connection for the same agent, which the server closes with code 4009. The sync epoch orders observations across connections.
+The server allocates a sync epoch each time it accepts a connection, by atomically incrementing a counter on the source record in PostgreSQL. For a cluster agent the source record is the cluster record. The counter belongs to the source, not the agent, so it keeps increasing when a replacement agent enrolls for an existing cluster. A cluster has one active agent at a time. A new connection supersedes any older connection for the same agent, which the server closes with code 4009. The sync epoch orders observations across connections and across agent replacements.
 
 ## Collections and scope
 
@@ -82,7 +88,8 @@ Snapshots map to `kube-runtime` watcher events: `Init` starts a snapshot, each `
 Deletion rules:
 
 - Only `snapshot_end` can infer deletions. The snapshot must have started in this connection, its scope must match, and the server must have received `item_count` items for it.
-- At `snapshot_end`, the server marks resources in that collection and scope as deleted when their last observation is older than the `snapshot_start` message. Resources listed in the snapshot, or updated after it started, have newer observations.
+- At `snapshot_end`, the server marks resources in that collection and scope as deleted when their stored order key is lower than the order key of the `snapshot_start` message. Every `upsert` in the snapshot advances the order key of the resource it names, even when the content is unchanged, so listed resources keep newer keys. Resources updated after the snapshot started also have newer keys.
+- Each inferred deletion leaves a tombstone with the order key of the `snapshot_end` message.
 - An aborted snapshot, a disconnect, a `collection_error`, a count mismatch, or a new `snapshot_start` for the same collection before the end leaves earlier resources unchanged.
 - Resources outside a narrower scope are not deleted. How they are shown is an open question in the architecture document.
 
@@ -97,9 +104,12 @@ The agent sanitizes objects before sending them. Secret data, managed fields, an
 
 Ordering:
 
-- Each observation's order key is `(sync_epoch, seq)`. The server applies an observation only when its key is greater than the stored key for that resource (cluster and UID). A delayed message from an older connection has a lower epoch and is ignored.
-- When both resource versions are decimal strings, the server also rejects an observation whose resource version is lower than the stored one. Kubernetes guarantees this ordering for 1.35 and later API servers within one resource type. It protects against a stale list after a reconnect.
-- A deleted resource keeps a tombstone with its order key. Kubernetes does not reuse UIDs, so any later `upsert` for a tombstoned UID is stale and ignored. A replacement with the same name has a new UID and is a new resource.
+- Each observation's order key is `(sync_epoch, seq)`. The server stores one order key per resource (cluster and UID): the key of the latest observation accepted for it.
+- An observation whose key is not greater than the stored key is ignored. A delayed message from an older connection or a replaced agent has a lower epoch and is ignored.
+- An accepted `upsert` always advances the stored key, which records that the resource was seen. It replaces the stored content only when it passes the resource version rule.
+- Resource version rule: when both resource versions are decimal strings, the server rejects content whose resource version is lower than the stored one. Kubernetes guarantees this ordering for 1.35 and later API servers within one resource type. It protects against a stale list after a reconnect.
+- An accepted `delete` advances the stored key and replaces the resource with a tombstone that keeps its last known resource version. A replacement with the same name has a new UID and is a new resource.
+- Kubernetes does not reuse UIDs, so an accepted `upsert` for a tombstoned UID that passes the resource version rule means the deletion was wrong. The server applies it, clears the tombstone, logs the anomaly, and increments a counter. An `upsert` with a lower order key is still ignored.
 
 ## Acknowledgements and flow control
 
@@ -112,7 +122,7 @@ Ordering:
 
 Duplicates come from reconnect snapshots, watcher relists, and a superseded connection whose messages are still being processed. All are harmless:
 
-- An `upsert` with the same UID and resource version as the stored observation only updates the last-confirmed time.
+- An `upsert` with the same UID and resource version as the stored observation leaves the content unchanged. If its order key is greater, it still advances the stored key and the last-confirmed time, so a snapshot that lists an unchanged resource does not delete it.
 - An observation with an older order key is ignored.
 - Snapshot IDs are UUIDs. A repeated `snapshot_end` is a no-op.
 

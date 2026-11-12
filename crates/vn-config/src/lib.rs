@@ -90,6 +90,12 @@ pub struct AuthConfig {
     pub admin: AdminMapping,
     #[serde(default)]
     pub session: SessionConfig,
+    /// Allows `issuer_url` and `public_url` to use plain http. Only for development over a
+    /// trusted network (loopback, or a VPN such as NetBird): over http, provider metadata
+    /// and signing keys can be tampered with in transit, and session cookies are sent
+    /// without the `Secure` flag.
+    #[serde(default)]
+    pub allow_insecure_http: bool,
 }
 
 /// Maps an OIDC claim to the installation `admin` role.
@@ -243,6 +249,14 @@ impl AuthConfig {
                 "scheme must be `http` or `https`",
             ));
         }
+        if issuer.scheme() == "http" && !self.allow_insecure_http {
+            return Err(invalid(
+                "auth.issuer_url",
+                "must use https, because provider metadata and signing keys are fetched \
+                 from it. For development over a trusted network (loopback, or a VPN such \
+                 as NetBird), set `auth.allow_insecure_http: true`.",
+            ));
+        }
         if issuer.query().is_some() || issuer.fragment().is_some() {
             return Err(invalid(
                 "auth.issuer_url",
@@ -267,6 +281,14 @@ impl AuthConfig {
             return Err(invalid(
                 "auth.public_url",
                 "scheme must be `http` or `https`",
+            ));
+        }
+        if public.scheme() == "http" && !self.allow_insecure_http {
+            return Err(invalid(
+                "auth.public_url",
+                "must use https, because session cookies are sent without the Secure flag \
+                 over http. For development over a trusted network (loopback, or a VPN \
+                 such as NetBird), set `auth.allow_insecure_http: true`.",
             ));
         }
         if public.path() != "/"
@@ -337,6 +359,13 @@ impl AuthConfig {
     /// Whether the public URL uses https, so cookies must be marked `Secure`.
     pub fn is_https(&self) -> bool {
         self.public_url.scheme() == "https"
+    }
+
+    /// Whether either the issuer or the public URL uses plain http, which validation
+    /// allows only with [`AuthConfig::allow_insecure_http`].
+    pub fn uses_insecure_http(&self) -> bool {
+        !self.is_https()
+            || url::Url::parse(&self.issuer_url).is_ok_and(|issuer| issuer.scheme() == "http")
     }
 
     /// Reads the client secret from the process environment.
@@ -759,13 +788,61 @@ auth:
             .replace(
                 "  session:\n    idle_timeout_minutes: 30\n    absolute_timeout_minutes: 480\n",
                 "",
-            )
-            .replace("https://vn.example.com", "http://10.0.0.5:5173");
+            );
         let auth = auth(&text);
         assert_eq!(auth.scopes, ["openid", "profile", "email"]);
         assert_eq!(auth.session, SessionConfig::default());
-        assert_eq!(auth.public_origin(), "http://10.0.0.5:5173");
+        assert!(!auth.allow_insecure_http);
+        assert!(!auth.uses_insecure_http());
+    }
+
+    fn allowing_insecure_http(text: &str) -> String {
+        text.replace(
+            "  public_url:",
+            "  allow_insecure_http: true\n  public_url:",
+        )
+    }
+
+    #[test]
+    fn http_issuer_requires_allow_insecure_http() {
+        let text = WITH_AUTH.replace("https://id.example.com", "http://id.example.com");
+        let message = err(&text);
+        assert!(message.contains("`auth.issuer_url`"), "{message}");
+        assert!(message.contains("must use https"), "{message}");
+        assert!(
+            message.contains("`auth.allow_insecure_http: true`"),
+            "{message}"
+        );
+
+        let auth = auth(&allowing_insecure_http(&text));
+        assert_eq!(auth.issuer_url, "http://id.example.com");
+        assert!(auth.is_https());
+        assert!(auth.uses_insecure_http());
+    }
+
+    #[test]
+    fn http_public_url_requires_allow_insecure_http() {
+        let text = WITH_AUTH.replace("https://vn.example.com", "http://100.64.0.5:5173");
+        let message = err(&text);
+        assert!(message.contains("`auth.public_url`"), "{message}");
+        assert!(message.contains("must use https"), "{message}");
+        assert!(
+            message.contains("`auth.allow_insecure_http: true`"),
+            "{message}"
+        );
+
+        let auth = auth(&allowing_insecure_http(&text));
+        assert_eq!(auth.public_origin(), "http://100.64.0.5:5173");
         assert!(!auth.is_https());
+        assert!(auth.uses_insecure_http());
+    }
+
+    #[test]
+    fn https_urls_do_not_need_allow_insecure_http() {
+        let auth = auth(&allowing_insecure_http(WITH_AUTH));
+        assert!(auth.allow_insecure_http);
+        assert!(auth.is_https());
+        assert!(!auth.uses_insecure_http());
     }
 
     #[test]

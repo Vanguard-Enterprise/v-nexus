@@ -45,7 +45,8 @@ The `auth` section in `config/vn.example.yaml` documents every setting. The valu
 
 - `issuer_url`: the provider's issuer, exactly as its discovery document reports it.
 - `client_id`, and `client_secret_env`: the name of the environment variable holding the client secret (`VN_OIDC_CLIENT_SECRET` in the example). The secret never goes in the file and is never logged.
-- `public_url`: the origin your browser uses to reach VN. With the Vite dev server that is `http://<host>:5173`; when the Rust server serves the UI it is `http://<host>:8080`. VN uses `<public_url>/api/v1/auth/callback` as the redirect URI, marks cookies `Secure` when `public_url` uses https, and rejects state-changing requests whose `Origin` header differs from it. Open the UI at exactly this origin, or sign-in and every change will fail.
+- `public_url`: the origin your browser uses to reach VN. With the Vite dev server that is `http://<host>:5173`; when the Rust server serves the UI it is `http://<host>:8080` (both need `allow_insecure_http`, below). VN uses `<public_url>/api/v1/auth/callback` as the redirect URI, marks cookies `Secure` when `public_url` uses https, and rejects state-changing requests whose `Origin` header differs from it. Open the UI at exactly this origin, or sign-in and every change will fail.
+- `allow_insecure_http`: `issuer_url` and `public_url` must use https unless this is `true`. Over http, provider metadata and signing keys can be tampered with in transit, and session cookies are sent without the `Secure` flag. Set it only for development over a trusted network, such as loopback or a VPN like NetBird; the server logs a warning at startup while it is in effect. The example config sets it because its `public_url` uses http.
 - `admin.claim` and `admin.values`: users whose claim contains one of the values get the installation `admin` role. The first admin therefore needs no database setup.
 
 ```sh

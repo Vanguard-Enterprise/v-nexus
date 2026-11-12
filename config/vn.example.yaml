@@ -33,6 +33,12 @@ auth:
   # redirect URI. With the Vite dev server, use its address, for example
   # http://<host>:5173. Cookies are marked Secure when this uses https.
   public_url: http://localhost:5173
+  # Allow http for `issuer_url` and `public_url`. Optional, defaults to false, in which
+  # case both must use https. Set it only for development over a trusted network
+  # (loopback, or a VPN such as NetBird): over http, provider metadata and signing keys
+  # can be tampered with in transit, and session cookies are sent without the Secure
+  # flag. The example needs it because `public_url` above uses http.
+  allow_insecure_http: true
   # Scopes requested at sign-in. Optional, defaults to [openid, profile, email]. Add
   # any scope your provider needs to release the admin claim, such as `groups`.
   scopes: [openid, profile, email]

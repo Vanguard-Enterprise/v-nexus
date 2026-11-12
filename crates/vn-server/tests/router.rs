@@ -55,6 +55,7 @@ fn app_with_auth() -> Router {
          \x20 client_id: vn\n\
          \x20 client_secret_env: VN_OIDC_CLIENT_SECRET\n\
          \x20 public_url: https://vn.example.com\n\
+         \x20 allow_insecure_http: true\n\
          \x20 admin: {claim: groups, values: [admins]}\n",
     )
     .unwrap();

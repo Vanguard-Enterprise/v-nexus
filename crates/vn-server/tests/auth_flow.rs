@@ -388,6 +388,7 @@ auth:
   client_id: {CLIENT_ID}
   client_secret_env: VN_OIDC_CLIENT_SECRET
   public_url: {PUBLIC_ORIGIN}
+  allow_insecure_http: true
   scopes: [openid, profile, email, groups]
   admin: {{claim: groups, values: [{ADMIN_GROUP}]}}
 {session_yaml}",

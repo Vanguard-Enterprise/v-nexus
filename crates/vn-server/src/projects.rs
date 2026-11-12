@@ -169,6 +169,7 @@ pub(crate) async fn assign(
     )
     .await?;
     let mut tx = state.db.begin().await?;
+    lock_project(&mut tx, project.id, &slug).await?;
     let previous: Option<String> = sqlx::query_scalar(
         "SELECT role FROM project_role_assignments \
          WHERE project_id = $1 AND user_id = $2 FOR UPDATE",
@@ -224,6 +225,7 @@ pub(crate) async fn unassign(
     )
     .await?;
     let mut tx = state.db.begin().await?;
+    lock_project(&mut tx, project.id, &slug).await?;
     let removed: Option<String> = sqlx::query_scalar(
         "DELETE FROM project_role_assignments WHERE project_id = $1 AND user_id = $2 \
          RETURNING role",
@@ -245,6 +247,28 @@ pub(crate) async fn unassign(
         .await?;
     tx.commit().await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Serializes role changes in a project for the rest of the transaction.
+///
+/// `FOR UPDATE` on the assignment row cannot do this for a first assignment, because no
+/// row exists yet: two concurrent first assignments would both read no previous role and
+/// record an inaccurate audit chain. `FOR NO KEY UPDATE` does not block the foreign key
+/// checks (`FOR KEY SHARE`) that other writes to the project's rows take.
+async fn lock_project(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    project_id: Uuid,
+    slug: &str,
+) -> Result<(), ApiFailure> {
+    let found: Option<i32> =
+        sqlx::query_scalar("SELECT 1 FROM projects WHERE id = $1 FOR NO KEY UPDATE")
+            .bind(project_id)
+            .fetch_optional(&mut **tx)
+            .await?;
+    match found {
+        Some(_) => Ok(()),
+        None => Err(ApiFailure::not_found(format!("no project `{slug}`"))),
+    }
 }
 
 /// `GET /api/v1/users` (installation admins): everyone who has signed in, for role

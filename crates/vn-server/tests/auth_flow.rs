@@ -533,19 +533,7 @@ auth:
 
     /// A state-changing request as the browser UI sends it.
     async fn write(&self, session: &str, method: Method, uri: &str, body: Value) -> TestResponse {
-        let request = Request::builder()
-            .method(method)
-            .uri(uri)
-            .header(header::COOKIE, format!("{SESSION_COOKIE}={session}"))
-            .header(header::ORIGIN, PUBLIC_ORIGIN);
-        let request = if body.is_null() {
-            request.body(Body::empty())
-        } else {
-            request
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(body.to_string()))
-        };
-        self.send(request.unwrap()).await
+        self.send(write_request(session, method, uri, body)).await
     }
 
     async fn audit_actions(&self) -> Vec<String> {
@@ -558,6 +546,22 @@ auth:
     async fn finish(self) {
         self.db.drop_database().await;
     }
+}
+
+fn write_request(session: &str, method: Method, uri: &str, body: Value) -> Request<Body> {
+    let request = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header(header::COOKIE, format!("{SESSION_COOKIE}={session}"))
+        .header(header::ORIGIN, PUBLIC_ORIGIN);
+    let request = if body.is_null() {
+        request.body(Body::empty())
+    } else {
+        request
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body.to_string()))
+    };
+    request.unwrap()
 }
 
 struct LoginStart {
@@ -1068,6 +1072,62 @@ async fn project_access_is_scoped_by_role() {
         assignments[3].1,
         json!({"role": "operator", "previous_role": "viewer"})
     );
+
+    h.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_role_changes_keep_the_audit_chain_accurate() {
+    let h = harness!(Harness::start());
+    let admin = h.sign_in(alice()).await;
+    h.sign_in(bob()).await;
+    let created = h
+        .write(
+            &admin,
+            Method::POST,
+            "/api/v1/projects",
+            json!({"slug": "prod", "name": "Production"}),
+        )
+        .await;
+    assert_eq!(created.status, StatusCode::CREATED);
+    let bob_id: uuid::Uuid = sqlx::query_scalar("SELECT id FROM users WHERE subject = 'bob'")
+        .fetch_one(&h.db.pool)
+        .await
+        .unwrap();
+
+    // Several first assignments race for a (project, user) pair with no role yet.
+    let uri = format!("/api/v1/projects/prod/members/{bob_id}");
+    let mut tasks = tokio::task::JoinSet::new();
+    for i in 0..8 {
+        let role = if i % 2 == 0 { "viewer" } else { "operator" };
+        let request = write_request(&admin, Method::PUT, &uri, json!({ "role": role }));
+        let app = h.app.clone();
+        tasks.spawn(async move { app.oneshot(request).await.unwrap().status() });
+    }
+    while let Some(status) = tasks.join_next().await {
+        assert_eq!(status.unwrap(), StatusCode::OK);
+    }
+
+    let details: Vec<Value> = sqlx::query_scalar(
+        "SELECT details FROM audit_events \
+         WHERE action = 'project.role_assign' AND target_user_id = $1 ORDER BY id",
+    )
+    .bind(bob_id)
+    .fetch_all(&h.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(details.len(), 8);
+    assert_eq!(details[0]["previous_role"], Value::Null, "{details:?}");
+    for pair in details.windows(2) {
+        assert_eq!(pair[1]["previous_role"], pair[0]["role"], "{details:?}");
+    }
+    let current: String =
+        sqlx::query_scalar("SELECT role FROM project_role_assignments WHERE user_id = $1")
+            .bind(bob_id)
+            .fetch_one(&h.db.pool)
+            .await
+            .unwrap();
+    assert_eq!(details[7]["role"], current.as_str());
 
     h.finish().await;
 }

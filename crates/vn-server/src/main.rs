@@ -1,4 +1,5 @@
 use std::io::IsTerminal;
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
@@ -73,7 +74,8 @@ async fn run(args: Args) -> anyhow::Result<()> {
         present
     });
 
-    let mut state = vn_server::AppState::new(pool.clone());
+    let mut state = vn_server::AppState::new(pool.clone())
+        .with_trusted_proxies(config.server.trusted_proxies.clone());
     match &config.auth {
         Some(auth) => {
             let secret = auth.resolve_client_secret()?;
@@ -112,10 +114,13 @@ async fn run(args: Args) -> anyhow::Result<()> {
         .with_context(|| format!("failed to bind {}", config.server.listen))?;
     tracing::info!(addr = %listener.local_addr()?, version = vn_server::VERSION, "listening");
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .context("server error")?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await
+    .context("server error")?;
 
     // Closing waits for checked-out connections. Bound it so a stalled database cannot
     // block shutdown indefinitely.

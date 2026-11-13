@@ -1093,6 +1093,7 @@ dependencies = [
  "http",
  "http-body",
  "pin-project-lite",
+ "tokio",
 ]
 
 [[package]]
@@ -1347,6 +1348,9 @@ name = "ipnet"
 version = "2.12.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "791930b43c0d5973160d90a8f3894509f2b273430f5c5c73b668636d0287c5c0"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "is_terminal_polyfill"
@@ -3404,6 +3408,7 @@ dependencies = [
 name = "vn-config"
 version = "0.1.0"
 dependencies = [
+ "ipnet",
  "serde",
  "serde_norway",
  "thiserror 2.0.21",
@@ -3431,8 +3436,10 @@ dependencies = [
  "chrono",
  "clap",
  "cookie",
+ "ed25519-dalek",
  "getrandom 0.4.3",
  "http-body-util",
+ "ipnet",
  "openidconnect",
  "rand 0.8.8",
  "reqwest",

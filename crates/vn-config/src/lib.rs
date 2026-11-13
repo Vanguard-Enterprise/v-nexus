@@ -91,6 +91,32 @@ pub struct ServerConfig {
     /// directory. When unset or missing on disk, UI routes return 404.
     #[serde(default)]
     pub static_dir: Option<PathBuf>,
+    /// Reverse proxies whose `X-Forwarded-For` header is believed, as addresses or CIDR
+    /// networks. Requests from other peers use the peer address as the client address,
+    /// which rate limiting and audit records use. Defaults to none.
+    #[serde(default, deserialize_with = "deserialize_networks")]
+    pub trusted_proxies: Vec<ipnet::IpNet>,
+}
+
+/// Reads a list of CIDR networks, accepting a bare address as a single-host network.
+fn deserialize_networks<'de, D>(deserializer: D) -> Result<Vec<ipnet::IpNet>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let values = Vec::<String>::deserialize(deserializer)?;
+    values
+        .iter()
+        .map(|value| {
+            value
+                .parse::<ipnet::IpNet>()
+                .or_else(|_| value.parse::<std::net::IpAddr>().map(ipnet::IpNet::from))
+                .map_err(|_| {
+                    serde::de::Error::custom(format!(
+                        "`{value}` is not an IP address or CIDR network"
+                    ))
+                })
+        })
+        .collect()
 }
 
 /// PostgreSQL settings.
@@ -677,7 +703,33 @@ auth:
         )
         .unwrap();
         assert_eq!(config.server.static_dir, None);
+        assert!(config.server.trusted_proxies.is_empty());
         assert_eq!(config.database.max_connections, DEFAULT_MAX_CONNECTIONS);
+    }
+
+    #[test]
+    fn parses_trusted_proxies_as_networks_or_addresses() {
+        let config = Config::from_yaml(&VALID.replace(
+            "  static_dir: web/dist\n",
+            "  static_dir: web/dist\n  trusted_proxies: [10.0.0.0/8, 192.0.2.7, \"::1\"]\n",
+        ))
+        .unwrap();
+        let proxies: Vec<String> = config
+            .server
+            .trusted_proxies
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(proxies, ["10.0.0.0/8", "192.0.2.7/32", "::1/128"]);
+
+        let message = err(&VALID.replace(
+            "  static_dir: web/dist\n",
+            "  static_dir: web/dist\n  trusted_proxies: [proxy.local]\n",
+        ));
+        assert!(
+            message.contains("`proxy.local` is not an IP address"),
+            "{message}"
+        );
     }
 
     #[test]

@@ -20,6 +20,7 @@ vn-core.workspace = true
 
 [dev-dependencies]
 axum.workspace = true
+sqlx.workspace = true
 vn-server.workspace = true
 
 [lints]

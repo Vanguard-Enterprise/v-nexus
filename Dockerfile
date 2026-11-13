@@ -9,6 +9,7 @@
 #
 # Build:  docker build -t vanguard-nexus .
 # Run:    docker run -p 8080:8080 -e VN_DATABASE_URL=postgres://... vanguard-nexus
+#         (add -e VN_OIDC_CLIENT_SECRET=... and a config with an `auth` section for sign-in)
 
 ARG NODE_VERSION=24
 ARG RUST_VERSION=1.96.0
@@ -80,6 +81,9 @@ COPY --from=web /src/web/dist/ /usr/share/vn/web/
 
 # Default container config. Mount a different file at /etc/vn/vn.yaml to override it.
 # The database URL is read from the VN_DATABASE_URL environment variable at runtime.
+# Sign-in stays disabled until a mounted config adds an `auth` section like the
+# commented one below (see config/vn.example.yaml); the client secret then comes from
+# VN_OIDC_CLIENT_SECRET.
 COPY --chmod=0644 <<'EOF' /etc/vn/vn.yaml
 version: 1
 server:
@@ -88,6 +92,14 @@ server:
 database:
   url_env: VN_DATABASE_URL
   max_connections: 10
+# auth:
+#   issuer_url: https://zitadel.example.com
+#   client_id: "000000000000000000@vanguard-nexus"
+#   client_secret_env: VN_OIDC_CLIENT_SECRET
+#   public_url: https://vn.example.com
+#   admin:
+#     claim: "urn:zitadel:iam:org:project:roles"
+#     values: [vn-admin]
 EOF
 
 ENV VN_CONFIG=/etc/vn/vn.yaml \

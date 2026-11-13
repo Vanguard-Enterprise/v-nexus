@@ -390,6 +390,127 @@ code {
   vertical-align: middle;
 }
 
+/* Layout */
+
+.stack {
+  display: grid;
+  gap: calc(var(--space) * 3);
+}
+
+.muted {
+  color: var(--muted);
+}
+
+.notice {
+  padding: 12px calc(var(--space) * 2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-panel);
+  background: var(--down-soft);
+}
+
+.button--primary {
+  display: inline-block;
+  border-color: var(--ink);
+  background: var(--ink);
+  color: var(--surface);
+  text-decoration: none;
+}
+
+.button--primary:hover {
+  background: var(--ink);
+  opacity: 0.9;
+}
+
+.button:disabled {
+  cursor: progress;
+  opacity: 0.7;
+}
+
+.badge {
+  display: inline-block;
+  padding: 1px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface-sunken);
+  color: var(--muted);
+  font-size: 0.75rem;
+  font-weight: 500;
+}
+
+/* Signed-in user */
+
+.user-menu {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  font-size: 0.875rem;
+}
+
+.user-menu__name {
+  font-weight: 500;
+}
+
+.user-menu__error {
+  color: var(--down);
+}
+
+/* Panels */
+
+.panel {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-panel);
+}
+
+.panel__header {
+  padding: calc(var(--space) * 2) calc(var(--space) * 3);
+  border-bottom: 1px solid var(--line);
+}
+
+.panel__header h2 {
+  font-size: 0.9375rem;
+  font-weight: 600;
+}
+
+.panel__body {
+  display: grid;
+  justify-items: start;
+  gap: calc(var(--space) * 2);
+  padding: calc(var(--space) * 3);
+}
+
+.project-list {
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.project-list li {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  padding: 10px 0;
+}
+
+.project-list li + li {
+  border-top: 1px solid var(--line);
+}
+
+.project-list__name {
+  font-weight: 500;
+}
+
+.project-list__slug {
+  color: var(--muted);
+}
+
+.project-list .badge {
+  margin-inline-start: auto;
+}
+
 @media (max-width: 640px) {
   .topbar__api {
     display: none;

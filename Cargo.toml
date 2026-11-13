@@ -17,19 +17,30 @@ vn-server = { path = "crates/vn-server" }
 # External crates
 anyhow = "1.0.104"
 axum = "0.8.9"
+axum-extra = { version = "0.12.6", default-features = false, features = ["cookie"] }
+base64 = "0.22.1"
+chrono = { version = "0.4.45", default-features = false, features = ["clock", "serde", "std"] }
 clap = { version = "4.6.7", features = ["derive", "env"] }
+cookie = "0.18.1"
+getrandom = "0.4.3"
 http-body-util = "0.1.5"
+openidconnect = { version = "4.1.0", default-features = false }
+rand = "0.8.5"
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "json", "http2"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 serde_norway = "0.9.42"
+sha2 = "0.10.9"
 sqlx = { version = "0.9.0", default-features = false, features = [
     "postgres",
     "runtime-tokio",
     "tls-rustls-aws-lc-rs",
     "migrate",
     "macros",
+    "chrono",
+    "uuid",
 ] }
+rsa = "0.9.10"
 tempfile = "3.27.0"
 thiserror = "2.0.21"
 tokio = { version = "1.54.1", features = ["macros", "net", "rt-multi-thread", "signal", "time"] }
@@ -38,12 +49,20 @@ tower-http = { version = "0.7.1", features = ["fs", "trace"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
 url = "2.5.8"
+uuid = { version = "1.29.2", features = ["serde"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
+
+# RSA key generation in the OIDC tests is very slow without optimization.
+[profile.dev.package.num-bigint-dig]
+opt-level = 3
+
+[profile.dev.package.rsa]
+opt-level = 3
 
 [profile.release]
 lto = "thin"

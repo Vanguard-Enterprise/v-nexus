@@ -73,10 +73,40 @@ async fn run(args: Args) -> anyhow::Result<()> {
         present
     });
 
-    let app = vn_server::router(
-        vn_server::AppState::new(pool.clone()),
-        static_dir.as_deref(),
-    );
+    let mut state = vn_server::AppState::new(pool.clone());
+    match &config.auth {
+        Some(auth) => {
+            let secret = auth.resolve_client_secret()?;
+            state = state.with_auth(
+                vn_server::AuthService::new(auth, &secret).context("invalid `auth` settings")?,
+            );
+            tracing::info!(
+                issuer = %auth.issuer_url,
+                public_url = %auth.public_origin(),
+                "OIDC sign-in enabled"
+            );
+            if auth.allow_insecure_http && auth.issuer_uses_http() {
+                tracing::warn!(
+                    "auth.allow_insecure_http is set and auth.issuer_url uses http: provider \
+                     metadata, signing keys, and token responses can be tampered with in \
+                     transit; use https outside development over a trusted network"
+                );
+            }
+            if auth.allow_insecure_http && !auth.is_https() {
+                tracing::warn!(
+                    "auth.allow_insecure_http is set and auth.public_url uses http: session \
+                     cookies are sent without the Secure flag; use https outside development \
+                     over a trusted network"
+                );
+            }
+        }
+        None => tracing::warn!(
+            "config has no `auth` section: sign-in is disabled and every API route \
+             except health answers 401"
+        ),
+    }
+
+    let app = vn_server::router(state, static_dir.as_deref());
     let listener = TcpListener::bind(config.server.listen)
         .await
         .with_context(|| format!("failed to bind {}", config.server.listen))?;

@@ -132,9 +132,24 @@ pub(crate) async fn enroll(
         return response;
     }
 
-    let result = match ApiJson::<EnrollRequest>::from_request(request, &state).await {
-        Ok(ApiJson(request)) => enroll_agent(&state, client, request).await,
-        Err(rejection) => Err(Refusal::new("invalid_request", rejection)),
+    // An admitted attempt keeps its limiter token while the body arrives, and a body
+    // that stalls counts as a failed attempt.
+    let body = tokio::time::timeout(
+        state.enroll_body_timeout,
+        ApiJson::<EnrollRequest>::from_request(request, &state),
+    )
+    .await;
+    let result = match body {
+        Ok(Ok(ApiJson(request))) => enroll_agent(&state, client, request).await,
+        Ok(Err(rejection)) => Err(Refusal::new("invalid_request", rejection)),
+        Err(_) => Err(Refusal::new(
+            "body_timeout",
+            ApiFailure::new(
+                StatusCode::REQUEST_TIMEOUT,
+                "request_timeout",
+                "The request body did not arrive in time.",
+            ),
+        )),
     };
     match result {
         Ok(body) => {

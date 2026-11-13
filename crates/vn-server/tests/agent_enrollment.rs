@@ -38,6 +38,9 @@ const REVOKED_CHANNEL: &str = "vn_agent_revoked";
 // Database
 // ---------------------------------------------------------------------------
 
+/// Short enrollment body timeout, so the stalled-body test finishes quickly.
+const BODY_TIMEOUT: Duration = Duration::from_millis(300);
+
 /// A freshly migrated database that exists for one test.
 struct TestDb {
     pool: PgPool,
@@ -139,7 +142,8 @@ auth:
         // Provider discovery is lazy, so no provider is needed while nobody signs in.
         let state = AppState::new(db.pool.clone())
             .with_auth(AuthService::new(&auth, &secret).unwrap())
-            .with_trusted_proxies(trusted_proxies);
+            .with_trusted_proxies(trusted_proxies)
+            .with_enroll_body_timeout(BODY_TIMEOUT);
         let app = router(state, None);
         let installation_id = sqlx::query_scalar("SELECT installation_id FROM installation")
             .fetch_one(&db.pool)
@@ -1143,6 +1147,27 @@ async fn malformed_enrollments_are_refused_and_audited() {
     assert_eq!(h.failure_reasons().await, expected);
     assert_eq!(h.count("agents").await, 0);
     h.enroll_new(&token).await;
+
+    h.finish().await;
+}
+
+#[tokio::test]
+async fn a_stalled_body_times_out_as_a_failed_attempt() {
+    let h = harness!(Harness::start());
+    let (_sender, pending_body) =
+        http_body_util::Channel::<axum::body::Bytes, std::convert::Infallible>::new(1);
+    let mut request = Request::post("/api/v1/agent/enroll")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::new(pending_body))
+        .unwrap();
+    let peer: SocketAddr = "198.51.100.7:1000".parse().unwrap();
+    request.extensions_mut().insert(ConnectInfo(peer));
+    let response = tokio::time::timeout(BODY_TIMEOUT * 10, h.send(request))
+        .await
+        .expect("a stalled body is answered once the body timeout passes");
+    assert_eq!(response.status, StatusCode::REQUEST_TIMEOUT);
+    assert_eq!(response.json["error"], "request_timeout");
+    assert_eq!(h.failure_reasons().await, ["body_timeout"]);
 
     h.finish().await;
 }

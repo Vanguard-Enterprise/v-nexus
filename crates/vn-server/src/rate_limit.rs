@@ -57,10 +57,17 @@ pub(crate) enum Acquire {
     },
 }
 
+#[derive(Debug, Default)]
+struct Clients {
+    buckets: HashMap<ClientKey, Bucket>,
+    /// When the table was last swept for full buckets while full.
+    last_sweep: Option<Instant>,
+}
+
 #[derive(Debug)]
 pub(crate) struct RateLimiter {
     limit: RateLimit,
-    buckets: Mutex<HashMap<ClientKey, Bucket>>,
+    clients: Mutex<Clients>,
 }
 
 impl RateLimiter {
@@ -68,7 +75,7 @@ impl RateLimiter {
         assert!(limit.burst > 0 && !limit.refill.is_zero());
         Self {
             limit,
-            buckets: Mutex::default(),
+            clients: Mutex::default(),
         }
     }
 
@@ -83,9 +90,21 @@ impl RateLimiter {
     }
 
     fn acquire_at(&self, key: ClientKey, now: Instant) -> Acquire {
-        let mut buckets = self.buckets.lock().unwrap_or_else(|e| e.into_inner());
+        let mut clients = self.clients.lock().unwrap_or_else(|e| e.into_inner());
+        let Clients {
+            buckets,
+            last_sweep,
+        } = &mut *clients;
         if !buckets.contains_key(&key) && buckets.len() >= MAX_CLIENTS {
-            buckets.retain(|_, bucket| self.refilled(*bucket, now) < f64::from(self.limit.burst));
+            // Sweep at most once per refill interval, so a full table costs a new client
+            // a constant-time refusal between sweeps rather than a scan under the lock.
+            let due =
+                last_sweep.is_none_or(|at| now.saturating_duration_since(at) >= self.limit.refill);
+            if due {
+                *last_sweep = Some(now);
+                buckets
+                    .retain(|_, bucket| self.refilled(*bucket, now) < f64::from(self.limit.burst));
+            }
             if buckets.len() >= MAX_CLIENTS {
                 return Acquire::Limited {
                     retry_after: self.limit.refill,
@@ -111,8 +130,8 @@ impl RateLimiter {
     }
 
     fn refund_at(&self, key: ClientKey, now: Instant) {
-        let mut buckets = self.buckets.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(bucket) = buckets.get_mut(&key) {
+        let mut clients = self.clients.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(bucket) = clients.buckets.get_mut(&key) {
             bucket.tokens = (self.refilled(*bucket, now) + 1.0).min(f64::from(self.limit.burst));
             bucket.updated = now;
         }
@@ -137,6 +156,47 @@ mod tests {
 
     fn key(s: &str) -> ClientKey {
         ClientKey::of(Some(s.parse().unwrap()))
+    }
+
+    #[test]
+    fn a_full_table_is_swept_at_most_once_per_refill_interval() {
+        let limiter = RateLimiter::new(LIMIT);
+        let start = Instant::now();
+        let capacity = u32::try_from(MAX_CLIENTS).unwrap();
+        for client in 0..capacity {
+            assert_eq!(
+                limiter.acquire_at(ClientKey::V4(client), start),
+                Acquire::Allowed
+            );
+        }
+        let swept_at = |limiter: &RateLimiter| limiter.clients.lock().unwrap().last_sweep;
+
+        // Every bucket is partly used, so the sweep frees nothing and the newcomer is refused.
+        let newcomer = ClientKey::V4(capacity);
+        assert!(matches!(
+            limiter.acquire_at(newcomer, start),
+            Acquire::Limited { .. }
+        ));
+        assert_eq!(swept_at(&limiter), Some(start));
+
+        // Once the buckets have refilled, a newcomer within the same refill interval is
+        // still refused without another sweep.
+        let refilled = start + LIMIT.refill;
+        let soon = refilled - Duration::from_secs(1);
+        let mut late = limiter.clients.lock().unwrap();
+        late.last_sweep = Some(soon);
+        drop(late);
+        assert!(matches!(
+            limiter.acquire_at(newcomer, refilled),
+            Acquire::Limited { .. }
+        ));
+        assert_eq!(swept_at(&limiter), Some(soon));
+
+        // After a full refill interval the next newcomer triggers a sweep that frees room.
+        let later = soon + LIMIT.refill;
+        assert_eq!(limiter.acquire_at(newcomer, later), Acquire::Allowed);
+        assert_eq!(swept_at(&limiter), Some(later));
+        assert_eq!(limiter.clients.lock().unwrap().buckets.len(), 1);
     }
 
     #[test]

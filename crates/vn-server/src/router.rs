@@ -31,6 +31,9 @@ const ENROLL_RATE_LIMIT: RateLimit = RateLimit {
 /// Largest accepted enrollment request body.
 const ENROLL_BODY_LIMIT: usize = 16 * 1024;
 
+/// How long an admitted enrollment attempt may take to send its body.
+const ENROLL_BODY_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Shared state for request handlers.
 #[derive(Clone)]
 pub struct AppState {
@@ -39,6 +42,7 @@ pub struct AppState {
     pub(crate) auth: Option<Arc<AuthService>>,
     pub(crate) trusted_proxies: Arc<[IpNet]>,
     pub(crate) enroll_limiter: Arc<RateLimiter>,
+    pub(crate) enroll_body_timeout: Duration,
 }
 
 impl AppState {
@@ -50,6 +54,7 @@ impl AppState {
             auth: None,
             trusted_proxies: Arc::new([]),
             enroll_limiter: Arc::new(RateLimiter::new(ENROLL_RATE_LIMIT)),
+            enroll_body_timeout: ENROLL_BODY_TIMEOUT,
         }
     }
 
@@ -63,6 +68,13 @@ impl AppState {
     /// Enables OIDC sign-in.
     pub fn with_auth(mut self, auth: AuthService) -> Self {
         self.auth = Some(Arc::new(auth));
+        self
+    }
+
+    /// Changes how long an enrollment attempt may take to send its body (10 seconds by
+    /// default), so tests need not wait for the default.
+    pub fn with_enroll_body_timeout(mut self, timeout: Duration) -> Self {
+        self.enroll_body_timeout = timeout;
         self
     }
 

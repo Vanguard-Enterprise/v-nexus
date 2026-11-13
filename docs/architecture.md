@@ -141,7 +141,7 @@ Proposed defaults below are the owner's provisional answers. The questions stay 
 
    Proposed default: a single replica for the first release. The design stays compatible with multiple replicas.
 
-8. What is the minimum supported Kubernetes version? Resource version ordering is guaranteed only on 1.35 and later. Older clusters rely on VN sequence numbers alone.
+8. What is the minimum supported Kubernetes version? Resource version ordering is guaranteed only on 1.35 and later, so the server applies the resource version rule only to clusters that report 1.35 or later. Older clusters rely on VN sequence numbers alone.
 
    Still open for the owner.
 

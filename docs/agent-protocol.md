@@ -65,13 +65,15 @@ Receivers ignore unknown fields. A receiver that gets an unknown message type re
 ## Session start
 
 1. The server sends `welcome` with the connection ID, the sync epoch, the heartbeat interval, the acknowledgement window, the message size limit, and its capabilities.
-2. The agent sends `hello` with its version, capabilities, cluster fingerprint, and, once jobs exist, its unfinished and unacknowledged jobs.
+2. The agent sends `hello` with its version, capabilities, cluster fingerprint, the Kubernetes API server version, and, once jobs exist, its unfinished and unacknowledged jobs.
 
 The server allocates a sync epoch each time it accepts a connection, by atomically incrementing a counter on the source record in PostgreSQL. The source record is separate from the cluster record, so a cluster can later have several sources with non-overlapping scopes (see the agent enrollment section of the architecture document). The counter belongs to the source, not the agent, so it keeps increasing when a replacement agent enrolls for an existing source. A source has one active agent at a time. A new connection supersedes any older connection for the same agent, which the server closes with code 4009. The sync epoch orders observations across connections and across agent replacements, and the epoch fence (see [Observations](#observations)) stops a superseded connection from persisting anything.
 
 ## Collections and scope
 
-A collection is one resource type, such as `v1/nodes`, `v1/namespaces`, or `apps/v1/deployments`. Its scope is exactly what the agent listed: the namespace (or all namespaces) plus any label or field selector. The server stores the scope recorded by the last completed snapshot of each collection.
+A collection is one resource type, such as `v1/nodes`, `v1/namespaces`, or `apps/v1/deployments`. Its scope is exactly what the agent listed: one namespace or all namespaces. The server stores the scope recorded by the last completed snapshot of each collection.
+
+Version 1 scopes have no label or field selectors. An existing object never changes namespace, so a resource cannot leave a namespace scope while it exists, and absence from a complete snapshot, or a watch `delete`, means the resource was deleted. A watch with a selector reports an object that stops matching as deleted, so selector scopes need a separate "left scope" state alongside deletion. They can be added later as a capability.
 
 ## Snapshots
 
@@ -90,7 +92,7 @@ Deletion rules:
 - Only `snapshot_end` can infer deletions. The snapshot must have started in this connection, its scope must match, and the server must have received `item_count` items for it.
 - At `snapshot_end`, the server marks resources in that collection and scope as deleted when their stored order key is lower than the order key of the `snapshot_start` message. Every `upsert` in the snapshot advances the order key of the resource it names, even when the content is unchanged, so listed resources keep newer keys. Resources updated after the snapshot started also have newer keys.
 - Each inferred deletion leaves a tombstone with the order key of the `snapshot_end` message.
-- An aborted snapshot, a disconnect, a `collection_error`, a count mismatch, or a new `snapshot_start` for the same collection before the end leaves earlier resources unchanged.
+- An aborted snapshot, a disconnect, a `collection_error`, a count mismatch, or a new `snapshot_start` for the same collection before the end infers no deletions. Upserts already accepted from that snapshot stay applied, because each one is a current observation that passed the ordering rules.
 - Resources outside a narrower scope are not deleted. How they are shown is an open question in the architecture document.
 
 ## Observations
@@ -109,7 +111,7 @@ Ordering:
 - The fence is needed because per-resource keys protect only resources that have a stored row. Without it, a delayed `upsert` from a superseded connection, for a resource that was never persisted and is absent from the newer connection's snapshot, would be accepted after that snapshot ends and add a resource that does not exist.
 - Per-resource keys remain a second layer. An observation whose key is not greater than the stored key is ignored.
 - An accepted `upsert` always advances the stored key, which records that the resource was seen. It replaces the stored content only when it passes the resource version rule.
-- Resource version rule: when both resource versions are decimal strings, the server rejects content whose resource version is lower than the stored one. Kubernetes guarantees this ordering for 1.35 and later API servers within one resource type. It protects against a stale list after a reconnect.
+- Resource version rule: only when `hello` reported a Kubernetes API server version of 1.35 or later, and both resource versions are decimal strings, the server rejects content whose resource version is lower than the stored one. Kubernetes guarantees this ordering only for 1.35 and later API servers, within one resource type, and treats resource versions as opaque on earlier versions. On older clusters the server orders content by order key alone. The rule adds protection against a stale list after a reconnect.
 - An accepted `delete` advances the stored key and replaces the resource with a tombstone that keeps its last known resource version. A replacement with the same name has a new UID and is a new resource.
 - Kubernetes does not reuse UIDs, so an accepted `upsert` for a tombstoned UID that passes the resource version rule means the deletion was wrong. The server applies it, clears the tombstone, logs the anomaly, and increments a counter. An `upsert` with a lower order key is still ignored.
 
@@ -155,9 +157,10 @@ Jobs reuse the same connection once deployment controls exist.
 | Server to agent | `job_offer` | `job_id`, `attempt`, `idempotency_key`, `kind`, `params`, `deadline` |
 | Agent to server | `job_accepted`, `job_rejected` | `job_id`, `attempt`, `reason` |
 | Agent to server | `job_progress` | `job_id`, `attempt`, progress details |
-| Agent to server | `job_result` | `job_id`, `attempt`, `idempotency_key`, `outcome` (`succeeded` or `failed`), details |
+| Agent to server | `job_result` | `job_id`, `attempt`, `idempotency_key`, `outcome` (`succeeded`, `failed`, or `unknown`), details |
 
 - The server persists a job before offering it and offers pending jobs for an agent when it connects.
 - The idempotency key stays the same across attempts of one job. The agent records the keys it has started, and their results, before acting. A repeated offer returns the recorded state or result instead of running the job again.
+- When an agent process starts, it turns every recorded job that has no result into a `job_result` with outcome `unknown`, because that process cannot know whether the previous one acted. The server handles it like `outcome_unknown` below. A later offer with the same key returns this result and does not run the job.
 - Unlike observations, job results cannot be rebuilt from a snapshot. The agent keeps unacknowledged results across reconnects and lists them in `hello`, with jobs still in progress.
 - If a disconnect leaves an outcome unknown and the agent does not report it after reconnecting, the server marks the job `outcome_unknown`. It retries automatically only job kinds declared safe to repeat. Later observations confirm the actual state.

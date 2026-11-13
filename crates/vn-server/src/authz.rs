@@ -21,6 +21,9 @@ pub(crate) enum ProjectPermission {
     Operate,
     /// Change who has access to the project.
     ManageMembers,
+    /// Create and revoke enrollment tokens, and revoke agents. Reserved for installation
+    /// admins in the first release.
+    ManageAgents,
 }
 
 impl ProjectPermission {
@@ -29,7 +32,7 @@ impl ProjectPermission {
         match self {
             ProjectPermission::View => true,
             ProjectPermission::Operate => role >= ProjectRole::Operator,
-            ProjectPermission::ManageMembers => false,
+            ProjectPermission::ManageMembers | ProjectPermission::ManageAgents => false,
         }
     }
 }
@@ -143,6 +146,7 @@ mod tests {
         assert!(allows(false, Some(Viewer), View));
         assert!(!allows(false, Some(Viewer), Operate));
         assert!(!allows(false, Some(Viewer), ManageMembers));
+        assert!(!allows(false, Some(Viewer), ManageAgents));
     }
 
     #[test]
@@ -150,11 +154,12 @@ mod tests {
         assert!(allows(false, Some(Operator), View));
         assert!(allows(false, Some(Operator), Operate));
         assert!(!allows(false, Some(Operator), ManageMembers));
+        assert!(!allows(false, Some(Operator), ManageAgents));
     }
 
     #[test]
     fn users_without_a_role_have_no_access() {
-        for permission in [View, Operate, ManageMembers] {
+        for permission in [View, Operate, ManageMembers, ManageAgents] {
             assert!(!allows(false, None, permission), "{permission:?}");
         }
     }
@@ -162,7 +167,7 @@ mod tests {
     #[test]
     fn installation_admins_have_every_permission() {
         for role in [None, Some(Viewer), Some(Operator)] {
-            for permission in [View, Operate, ManageMembers] {
+            for permission in [View, Operate, ManageMembers, ManageAgents] {
                 assert!(allows(true, role, permission), "{role:?} {permission:?}");
             }
         }

@@ -10,6 +10,11 @@ server:
   # Built web UI (web/dist after `pnpm build`). Relative paths resolve against the
   # working directory. Optional: if unset or missing on disk, UI routes return 404.
   static_dir: web/dist
+  # Reverse proxies whose X-Forwarded-For header VN believes, as addresses or CIDR
+  # networks. Optional, defaults to none, in which case the TCP peer is the client
+  # address used for rate limiting and audit records. List your ingress or proxy here
+  # when one fronts VN.
+  trusted_proxies: []
 
 database:
   # Name of the environment variable that holds the PostgreSQL connection URL.

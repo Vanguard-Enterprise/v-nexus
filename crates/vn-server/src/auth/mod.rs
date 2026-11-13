@@ -18,6 +18,7 @@ use vn_core::User;
 pub(crate) use handlers::{callback, login, logout, me};
 pub(crate) use oidc::OidcError;
 use session::{SessionStatus, SessionTimes};
+pub(crate) use session::{Token, hash_token};
 
 use crate::error::ApiFailure;
 use crate::router::AppState;

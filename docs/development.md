@@ -88,6 +88,73 @@ await send("PUT", `/projects/prod/members/${user.id}`, { role: "viewer" });
 
 Replace `<subject>` with the user's subject (`sub` claim) at the provider. `viewer` may view a project; `operator` may also operate it. Users only see projects they hold a role in, and admins see all of them.
 
+## Enroll an agent
+
+Agents register with single-use enrollment tokens. For the first release only installation admins create and revoke tokens and agents; project members with a role can list a project's agents.
+
+### Create an enrollment token
+
+A token targets either a new cluster, by display name, or an existing source whose agent is being replaced (`{"type": "replace_source", "source_id": "<source ID>"}`, using the `source_id` from the agent list). It expires after `expires_in_minutes` (default 60, at most 1440) and enrolls one agent. From the browser's developer console while signed in as an admin, with `send` from [Sessions and roles](#sessions-and-roles):
+
+```js
+const created = await send("POST", "/projects/prod/enrollment-tokens", {
+  kind: "kubernetes",
+  target: { type: "new_cluster", display_name: "east" },
+  expires_in_minutes: 60,
+});
+created.secret; // vn_enroll_<token ID>_<secret>, shown only in this response
+```
+
+The token string has the form `vn_enroll_<token ID>_<secret>`: the token ID is the public ID as 32 hex digits, and the secret is 256 random bits. VN stores only the SHA-256 of the secret, so a lost token cannot be shown again. Create a new one instead.
+
+List a project's tokens with `GET /api/v1/projects/prod/enrollment-tokens`, and revoke one that has not been used with `POST /api/v1/projects/prod/enrollment-tokens/<token ID>/revoke`.
+
+### Enroll
+
+The agent sends the token, its Ed25519 public key, and a signature proving it holds the private key, to `POST /api/v1/agent/enroll`. The endpoint needs no session and no `Origin` header. The signed message is the ASCII string `vn-agent-enroll-v1`, a zero byte, the 16 raw bytes of the installation ID, the 16 raw bytes of the token ID, and the 32 raw bytes of the public key. Keys and signatures are URL-safe base64 without padding. The agent reads the installation ID from `GET /api/v1/agent/info`.
+
+Until `vn-agent` exists, `curl` and `openssl` can play the agent:
+
+```sh
+SERVER=http://127.0.0.1:8080
+TOKEN='<the vn_enroll_ token string>'
+b64url() { base64 -w0 | tr '+/' '-_' | tr -d '='; }
+
+openssl genpkey -algorithm ed25519 -out agent.pem
+openssl pkey -in agent.pem -pubout -outform DER | tail -c 32 > agent.pub
+INSTALLATION_ID=$(curl -fsS "$SERVER/api/v1/agent/info" | jq -r .installation_id)
+TOKEN_ID=$(printf %s "$TOKEN" | cut -c11-42)
+{
+  printf 'vn-agent-enroll-v1\0'
+  printf %s "$INSTALLATION_ID" | tr -d - | xxd -r -p
+  printf %s "$TOKEN_ID" | xxd -r -p
+  cat agent.pub
+} > enroll.msg
+openssl pkeyutl -sign -rawin -inkey agent.pem -in enroll.msg -out enroll.sig
+
+jq -n --arg token "$TOKEN" --arg installation "$INSTALLATION_ID" \
+  --arg key "$(b64url < agent.pub)" --arg sig "$(b64url < enroll.sig)" \
+  '{token: $token, installation_id: $installation, kind: "kubernetes",
+    public_key: $key, signature: $sig, agent_version: "0.1.0-dev",
+    protocol_versions: [1], cluster_fingerprint: "dev-cluster-uid"}' |
+  curl -fsS "$SERVER/api/v1/agent/enroll" -H 'Content-Type: application/json' -d @-
+```
+
+A real cluster agent reports the UID of its `kube-system` namespace as `cluster_fingerprint` (`kubectl get namespace kube-system -o jsonpath='{.metadata.uid}'`). A replacement agent for an existing source must report the same fingerprint.
+
+The response holds the agent ID, installation ID, cluster ID, source ID, and key ID. Enrollment creates the cluster and its one whole-cluster source. A replacement enrollment revokes the source's previous agent in the same transaction.
+
+Every refused attempt before the token is proven answers with the same `401 enrollment_failed`, whether the token ID is unknown, the secret is wrong, the token is expired, revoked, or used, or the signature does not verify. The reason is recorded in the audit log as `agent.enroll_failed`. Attempts are rate-limited per client address: a burst of 10, then one more every 6 seconds. Successful enrollments do not count, and IPv6 clients are grouped by /64. The limiter lives in the server process. Behind a reverse proxy, list the proxy in `server.trusted_proxies` so VN reads the client address from `X-Forwarded-For`; otherwise every request appears to come from the proxy and shares one limit.
+
+### Revoke an agent
+
+```js
+const { agents } = await (await fetch("/api/v1/projects/prod/agents")).json();
+await send("POST", `/projects/prod/agents/${agents[0].id}/revoke`);
+```
+
+Revocation marks the agent revoked, records an audit event, and sends a PostgreSQL notification on the `vn_agent_revoked` channel in one transaction. The cluster, its source, and its inventory stay. To bring the cluster back, create a `replace_source` token for its source and enroll a new agent.
+
 ## Run the server
 
 ```sh
@@ -129,7 +196,7 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
 ```
 
-The Rust build and unit tests do not need a running database. The sign-in and access-control integration tests in `crates/vn-server/tests/auth_flow.rs` run against a mock OIDC provider and a real PostgreSQL, and are skipped (with a printed note) unless `DATABASE_URL` is set. Each test creates and drops its own database, so the user needs permission to create databases. With the Compose database:
+The Rust build and unit tests do not need a running database. The sign-in and access-control integration tests in `crates/vn-server/tests/auth_flow.rs` run against a mock OIDC provider and a real PostgreSQL, and the enrollment tests in `crates/vn-server/tests/agent_enrollment.rs` against a real PostgreSQL. Both are skipped (with a printed note) unless `DATABASE_URL` is set. Each test creates and drops its own database, so the user needs permission to create databases. With the Compose database:
 
 ```sh
 DATABASE_URL=postgres://vn:vn@localhost:5432/vn cargo test --workspace --locked

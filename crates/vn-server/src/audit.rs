@@ -12,16 +12,26 @@ pub(crate) struct AuditEvent {
     pub(crate) actor_user_id: Option<Uuid>,
     pub(crate) project_id: Option<Uuid>,
     pub(crate) target_user_id: Option<Uuid>,
+    pub(crate) agent_id: Option<Uuid>,
     pub(crate) details: Value,
 }
 
 impl AuditEvent {
     pub(crate) fn new(action: &'static str, actor_user_id: Uuid) -> Self {
         Self {
-            action,
             actor_user_id: Some(actor_user_id),
+            ..Self::system(action)
+        }
+    }
+
+    /// An event without a user actor, such as an agent enrolling with a token.
+    pub(crate) fn system(action: &'static str) -> Self {
+        Self {
+            action,
+            actor_user_id: None,
             project_id: None,
             target_user_id: None,
+            agent_id: None,
             details: Value::Object(serde_json::Map::new()),
         }
     }
@@ -36,6 +46,12 @@ impl AuditEvent {
         self
     }
 
+    /// The agent the event is about.
+    pub(crate) fn agent(mut self, agent_id: Uuid) -> Self {
+        self.agent_id = Some(agent_id);
+        self
+    }
+
     pub(crate) fn details(mut self, details: Value) -> Self {
         self.details = details;
         self
@@ -45,13 +61,15 @@ impl AuditEvent {
     /// change and its audit record commit together.
     pub(crate) async fn record(self, conn: &mut PgConnection) -> sqlx::Result<()> {
         sqlx::query(
-            "INSERT INTO audit_events (action, actor_user_id, project_id, target_user_id, details) \
-             VALUES ($1, $2, $3, $4, $5)",
+            "INSERT INTO audit_events \
+                 (action, actor_user_id, project_id, target_user_id, agent_id, details) \
+             VALUES ($1, $2, $3, $4, $5, $6)",
         )
         .bind(self.action)
         .bind(self.actor_user_id)
         .bind(self.project_id)
         .bind(self.target_user_id)
+        .bind(self.agent_id)
         .bind(sqlx::types::Json(self.details))
         .execute(conn)
         .await?;

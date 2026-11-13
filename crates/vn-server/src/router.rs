@@ -1,21 +1,35 @@
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::Router;
-use axum::extract::OriginalUri;
+use axum::extract::{DefaultBodyLimit, OriginalUri};
 use axum::http::{Method, StatusCode};
 use axum::middleware;
 use axum::response::Response;
 use axum::routing::{any, get, post, put};
+use ipnet::IpNet;
 use sqlx::PgPool;
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::{DefaultOnResponse, TraceLayer};
 use tracing::Level;
 
+use crate::agents;
 use crate::auth::{self, AuthService};
 use crate::error::api_error;
 use crate::health::{DatabaseHealth, health};
 use crate::projects;
+use crate::rate_limit::{RateLimit, RateLimiter};
+
+/// Enrollment attempts per client address: a burst of 10, then one every 6 seconds.
+/// Successful enrollments do not count.
+const ENROLL_RATE_LIMIT: RateLimit = RateLimit {
+    burst: 10,
+    refill: Duration::from_secs(6),
+};
+
+/// Largest accepted enrollment request body.
+const ENROLL_BODY_LIMIT: usize = 16 * 1024;
 
 /// Shared state for request handlers.
 #[derive(Clone)]
@@ -23,6 +37,8 @@ pub struct AppState {
     pub(crate) database: Arc<dyn DatabaseHealth>,
     pub(crate) db: PgPool,
     pub(crate) auth: Option<Arc<AuthService>>,
+    pub(crate) trusted_proxies: Arc<[IpNet]>,
+    pub(crate) enroll_limiter: Arc<RateLimiter>,
 }
 
 impl AppState {
@@ -32,7 +48,16 @@ impl AppState {
             database: Arc::new(pool.clone()),
             db: pool,
             auth: None,
+            trusted_proxies: Arc::new([]),
+            enroll_limiter: Arc::new(RateLimiter::new(ENROLL_RATE_LIMIT)),
         }
+    }
+
+    /// Believes `X-Forwarded-For` from these reverse proxies when resolving client
+    /// addresses.
+    pub fn with_trusted_proxies(mut self, proxies: impl Into<Arc<[IpNet]>>) -> Self {
+        self.trusted_proxies = proxies.into();
+        self
     }
 
     /// Enables OIDC sign-in.
@@ -52,7 +77,8 @@ impl AppState {
 /// Builds the application router.
 ///
 /// API routes live under `/api/v1`; any other `/api` path gets a JSON 404. Every API route
-/// except health and the sign-in endpoints requires a session. Remaining paths are served
+/// except health, the sign-in endpoints, and the agent endpoints requires a session.
+/// Agents authenticate with their own credentials, never a session. Remaining paths are served
 /// from `static_dir` with `index.html` as the SPA fallback, or 404 when no static
 /// directory is available.
 pub fn router(state: AppState, static_dir: Option<&Path>) -> Router {
@@ -70,14 +96,32 @@ pub fn router(state: AppState, static_dir: Option<&Path>) -> Router {
             "/projects/{slug}/members/{user_id}",
             put(projects::assign).delete(projects::unassign),
         )
+        .route(
+            "/projects/{slug}/enrollment-tokens",
+            get(agents::list_tokens).post(agents::create_token),
+        )
+        .route(
+            "/projects/{slug}/enrollment-tokens/{token_id}/revoke",
+            post(agents::revoke_token),
+        )
+        .route("/projects/{slug}/agents", get(agents::list))
+        .route(
+            "/projects/{slug}/agents/{agent_id}/revoke",
+            post(agents::revoke),
+        )
         .route("/users", get(projects::users))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             auth::require_session,
         ));
+    let agent_routes = Router::new().route("/info", get(agents::info)).route(
+        "/enroll",
+        post(agents::enroll).layer(DefaultBodyLimit::max(ENROLL_BODY_LIMIT)),
+    );
     let v1 = Router::new()
         .route("/health", get(health))
         .nest("/auth", auth_routes)
+        .nest("/agent", agent_routes)
         .merge(protected);
     let api = Router::new()
         .nest("/v1", v1)

@@ -1170,6 +1170,21 @@ async fn failed_attempts_are_rate_limited_per_client() {
     // Refused before any work, and not audited, so a flood cannot fill the audit log.
     assert_eq!(h.failure_reasons().await.len(), 10);
 
+    // A limited client is refused before its body is read: a body that never
+    // finishes still gets an immediate 429 instead of holding the request open.
+    let (_sender, pending_body) =
+        http_body_util::Channel::<axum::body::Bytes, std::convert::Infallible>::new(1);
+    let mut request = Request::post("/api/v1/agent/enroll")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::new(pending_body))
+        .unwrap();
+    let peer: SocketAddr = "198.51.100.1:3000".parse().unwrap();
+    request.extensions_mut().insert(ConnectInfo(peer));
+    let limited = tokio::time::timeout(Duration::from_secs(5), h.send(request))
+        .await
+        .expect("a limited client is answered without reading its body");
+    assert_eq!(limited.status, StatusCode::TOO_MANY_REQUESTS);
+
     // Another client is unaffected, even with a valid token.
     let key = AgentKey::generate();
     let response = h

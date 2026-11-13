@@ -38,7 +38,7 @@ vn-config.workspace = true
 vn-core.workspace = true
 
 [dev-dependencies]
-http-body-util.workspace = true
+http-body-util = { workspace = true, features = ["channel"] }
 rand.workspace = true
 rsa.workspace = true
 tempfile.workspace = true

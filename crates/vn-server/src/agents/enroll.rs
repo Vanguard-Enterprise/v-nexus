@@ -11,7 +11,7 @@
 use std::net::IpAddr;
 
 use axum::Json;
-use axum::extract::State;
+use axum::extract::{FromRequest, Request, State};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use base64::Engine;
@@ -111,10 +111,12 @@ impl From<ApiFailure> for Refusal {
 pub(crate) async fn enroll(
     State(state): State<AppState>,
     ClientAddr(client): ClientAddr,
-    request: Result<ApiJson<EnrollRequest>, ApiFailure>,
+    request: Request,
 ) -> Response {
     // Every attempt takes a token up front, so concurrent attempts cannot exceed the
-    // limit. Successful enrollments hand it back: only failures count.
+    // limit. Successful enrollments hand it back: only failures count. The body is
+    // read only after this check, so a limited client cannot make the server receive
+    // or parse request bodies.
     if let Acquire::Limited { retry_after } = state.enroll_limiter.acquire(client) {
         tracing::debug!(client = ?client, "enrollment attempt rate-limited");
         let mut response = ApiFailure::new(
@@ -130,7 +132,7 @@ pub(crate) async fn enroll(
         return response;
     }
 
-    let result = match request {
+    let result = match ApiJson::<EnrollRequest>::from_request(request, &state).await {
         Ok(ApiJson(request)) => enroll_agent(&state, client, request).await,
         Err(rejection) => Err(Refusal::new("invalid_request", rejection)),
     };

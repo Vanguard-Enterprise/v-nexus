@@ -39,7 +39,7 @@ The server rejects failed steps with an HTTP status and a JSON error before upgr
 | 4000 | Protocol error | Reconnect with backoff and report the error. |
 | 4001 | Session invalid or expired | Request a new challenge and session. |
 | 4003 | Agent revoked | Stop connecting and report that re-enrollment is needed. |
-| 4009 | Superseded by a newer connection for the same agent | Back off and warn: two agent instances may be running. |
+| 4009 | Superseded by a newer connection for the same agent | Back off. Warn unless this replica has lost its leader Lease: otherwise two agent instances may be running. |
 | 4010 | Identity mismatch, such as a different cluster fingerprint | Stop connecting and report the mismatch. |
 
 ## Envelope
@@ -67,7 +67,7 @@ Receivers ignore unknown fields. A receiver that gets an unknown message type re
 1. The server sends `welcome` with the connection ID, the sync epoch, the heartbeat interval, the acknowledgement window, the message size limit, and its capabilities.
 2. The agent sends `hello` with its version, capabilities, cluster fingerprint, and, once jobs exist, its unfinished and unacknowledged jobs.
 
-The server allocates a sync epoch each time it accepts a connection, by atomically incrementing a counter on the source record in PostgreSQL. For a cluster agent the source record is the cluster record. The counter belongs to the source, not the agent, so it keeps increasing when a replacement agent enrolls for an existing cluster. A cluster has one active agent at a time. A new connection supersedes any older connection for the same agent, which the server closes with code 4009. The sync epoch orders observations across connections and across agent replacements, and the epoch fence (see [Observations](#observations)) stops a superseded connection from persisting anything.
+The server allocates a sync epoch each time it accepts a connection, by atomically incrementing a counter on the source record in PostgreSQL. The source record is separate from the cluster record, so a cluster can later have several sources with non-overlapping scopes (see the agent enrollment section of the architecture document). The counter belongs to the source, not the agent, so it keeps increasing when a replacement agent enrolls for an existing source. A source has one active agent at a time. A new connection supersedes any older connection for the same agent, which the server closes with code 4009. The sync epoch orders observations across connections and across agent replacements, and the epoch fence (see [Observations](#observations)) stops a superseded connection from persisting anything.
 
 ## Collections and scope
 

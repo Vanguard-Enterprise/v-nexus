@@ -12,7 +12,7 @@ A self-hosted infrastructure management platform for applications, Kubernetes cl
 
 ## Planning
 
-The agreed [initial architecture](docs/architecture.md) covers the application stack, data ownership, agent synchronization, and the first cluster inventory milestone.
+The agreed [initial architecture](docs/architecture.md) covers the application stack, data ownership, agent synchronization, and the first cluster inventory milestone. The [agent protocol sketch](docs/agent-protocol.md) describes the agent connection and message framing.
 
 Open [project-priorities.html](project-priorities.html) in a browser for the current feature ideas and examples. Priorities are provisional, and entries describe planned capabilities.
 

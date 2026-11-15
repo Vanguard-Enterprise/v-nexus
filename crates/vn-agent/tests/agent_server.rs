@@ -92,7 +92,7 @@ agents: {{challenge_key_env: VN_AGENT_CHALLENGE_KEY}}
             .resolve_challenge_key_with(|_| Some(STANDARD.encode([3u8; 32])))
             .unwrap();
         let state = AppState::new(pool.clone())
-            .with_auth(AuthService::new(&auth, &secret).unwrap())
+            .with_auth(AuthService::new(&auth, secret.as_ref()).unwrap())
             .with_agent_challenge_key(key)
             .with_agent_connection_settings(settings);
         let tasks = state.start_agent_tasks().await.unwrap();

@@ -152,7 +152,7 @@ agents:
             .resolve_client_secret_with(|_| Some("unused".into()))
             .unwrap();
         let mut state = AppState::new(db.pool.clone())
-            .with_auth(AuthService::new(&auth, &secret).unwrap())
+            .with_auth(AuthService::new(&auth, secret.as_ref()).unwrap())
             .with_agent_connection_settings(settings);
         if agents {
             let key = config

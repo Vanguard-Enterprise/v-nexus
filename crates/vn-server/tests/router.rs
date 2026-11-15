@@ -322,3 +322,16 @@ fn static_site() -> tempfile::TempDir {
     std::fs::write(dir.path().join("assets/app.js"), APP_JS).unwrap();
     dir
 }
+
+#[tokio::test]
+async fn serves_the_kubernetes_agent_manifest_without_a_session() {
+    let manifest = include_str!("../../../deploy/kubernetes/vn-agent.yaml");
+    for app in [app(FakeDatabase::Up, None), app_with_auth()] {
+        let (status, content_type, body) =
+            get(app, "/api/v1/agent/manifests/kubernetes.yaml").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(content_type.as_deref(), Some("application/yaml"));
+        assert_eq!(String::from_utf8(body).unwrap(), manifest);
+    }
+    assert!(manifest.contains("image: ghcr.io/vanguard-enterprise/vn-agent:latest"));
+}

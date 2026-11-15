@@ -19,7 +19,9 @@ export function ProjectPage() {
   const [registering, setRegistering] = useState(false);
   useDocumentTitle(project.data?.name ?? slug);
 
-  if (project.error) {
+  // Only without cached data: a failed background refresh must not unmount the page, which
+  // would drop a just-issued enrollment token held by RegisterCluster.
+  if (project.error && !project.data) {
     return (
       <>
         <Breadcrumbs items={[{ label: "Projects", to: "/" }, { label: slug }]} />
@@ -42,6 +44,11 @@ export function ProjectPage() {
         </p>
       </div>
       <div className="stack">
+        {project.error && (
+          <p className="callout" data-tone="degraded" role="alert">
+            The project could not be refreshed. {project.error.message}
+          </p>
+        )}
         {registering && canManageAgents && (
           <RegisterCluster
             slug={slug}

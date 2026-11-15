@@ -278,11 +278,14 @@ The agent pod cannot reach the server at `127.0.0.1`, which is the pod itself. G
 3. Create the namespace and the enrollment Secret, then apply the manifest. `<VN public URL>` is the URL the agent uses to reach the server, for example `http://<NetBird IP>:8080` with the local cluster:
 
    ```sh
-   kubectl create namespace vn-agent
+   kubectl create namespace vn-agent --dry-run=client -o yaml | kubectl apply -f -
    kubectl -n vn-agent create secret generic vn-agent-enrollment \
-     --from-literal=server-url=<VN public URL> --from-literal=token=<token>
+     --from-literal=server-url=<VN public URL> --from-literal=token=<token> \
+     --dry-run=client -o yaml | kubectl apply --server-side --force-conflicts -f -
    kubectl apply -f <VN public URL>/api/v1/agent/manifests/kubernetes.yaml
    ```
+
+   The first two commands create or update, so they can be run again with a new token when an earlier token expired before the agent enrolled. Applying the Secret server-side keeps the token out of the `last-applied-configuration` annotation.
 
    With the local cluster, add `--context kind-vn-dev` to each command. `kubectl apply -f deploy/kubernetes/vn-agent.yaml` applies the same manifest from the checkout.
 

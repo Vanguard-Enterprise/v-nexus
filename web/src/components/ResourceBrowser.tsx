@@ -29,8 +29,15 @@ interface ResourceBrowserProps {
 /** Filters, table, and pagination for one collection of a cluster. */
 export function ResourceBrowser({ slug, clusterId, filters, onChange }: ResourceBrowserProps) {
   const namespaced = isNamespaced(filters.collection);
-  // Pagination restarts whenever a filter changes, so key the pages on the filters.
-  const pageKey = JSON.stringify([filters.collection, namespaced ? filters.namespace : "", filters.search, filters.includeDeleted]);
+  // Pagination restarts whenever the cluster or a filter changes, so key the pages on both.
+  const pageKey = JSON.stringify([
+    slug,
+    clusterId,
+    filters.collection,
+    namespaced ? filters.namespace : "",
+    filters.search,
+    filters.includeDeleted,
+  ]);
 
   return (
     <div className="browser">

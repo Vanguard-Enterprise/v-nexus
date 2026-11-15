@@ -121,14 +121,19 @@ export async function revokeEnrollmentToken(slug: string, tokenId: string): Prom
 /**
  * Commands that install the agent with a new enrollment token. `serverUrl` is the URL
  * agents use to reach this server; the UI passes its own origin.
+ *
+ * The namespace and Secret commands create or update, so they also work when an earlier
+ * attempt left them behind (for example when its token expired before the agent enrolled).
+ * The Secret is applied server-side, which does not copy the token into an annotation.
  */
 export function installCommands(serverUrl: string, secret: string): string[] {
   const base = serverUrl.replace(/\/+$/, "");
   return [
-    "kubectl create namespace vn-agent",
+    "kubectl create namespace vn-agent --dry-run=client -o yaml | kubectl apply -f -",
     [
       "kubectl -n vn-agent create secret generic vn-agent-enrollment \\",
-      `  --from-literal=server-url=${base} --from-literal=token=${secret}`,
+      `  --from-literal=server-url=${base} --from-literal=token=${secret} \\`,
+      "  --dry-run=client -o yaml | kubectl apply --server-side --force-conflicts -f -",
     ].join("\n"),
     `kubectl apply -f ${base}/api/v1/agent/manifests/kubernetes.yaml`,
   ];

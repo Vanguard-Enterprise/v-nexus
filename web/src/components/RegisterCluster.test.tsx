@@ -1,4 +1,4 @@
-import { fireEvent, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { ProjectPage } from "../pages/ProjectPage";
 import { PROJECT, TOKEN } from "../test/fixtures";
@@ -57,8 +57,8 @@ describe("Register cluster", () => {
       .getAllByRole("listitem")
       .map((item) => item.querySelector("code")?.textContent);
     expect(commands).toEqual([
-      "kubectl create namespace vn-agent",
-      `kubectl -n vn-agent create secret generic vn-agent-enrollment \\\n  --from-literal=server-url=${origin} --from-literal=token=${SECRET}`,
+      "kubectl create namespace vn-agent --dry-run=client -o yaml | kubectl apply -f -",
+      `kubectl -n vn-agent create secret generic vn-agent-enrollment \\\n  --from-literal=server-url=${origin} --from-literal=token=${SECRET} \\\n  --dry-run=client -o yaml | kubectl apply --server-side --force-conflicts -f -`,
       `kubectl apply -f ${origin}/api/v1/agent/manifests/kubernetes.yaml`,
     ]);
 
@@ -146,5 +146,25 @@ describe("Register cluster", () => {
     expect(screen.queryByRole("button", { name: "Register cluster" })).not.toBeInTheDocument();
     expect(screen.queryByRole("region", { name: "Enrollment tokens" })).not.toBeInTheDocument();
     expect(requestsTo(fetchMock, "GET", "/api/v1/projects/prod/enrollment-tokens")).toHaveLength(0);
+  });
+
+  it("keeps the issued token when a background project refresh fails", async () => {
+    let failing = false;
+    serve({
+      "GET /api/v1/projects/prod": () =>
+        failing ? jsonResponse({ error: "internal", message: "database unavailable" }, 500) : jsonResponse(PROJECT),
+    });
+    const { client } = renderPage(<ProjectPage />, page);
+    fireEvent.click(await screen.findByRole("button", { name: "Register cluster" }));
+    fireEvent.change(screen.getByLabelText("Cluster name"), { target: { value: "prod-east" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create enrollment token" }));
+    const panel = await screen.findByRole("region", { name: "Install the agent on prod-east" });
+    expect(within(panel).getByText(SECRET)).toBeInTheDocument();
+
+    failing = true;
+    await act(() => client.refetchQueries({ queryKey: ["project", "prod"], exact: true }));
+
+    expect(await screen.findByText(/The project could not be refreshed/)).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Install the agent on prod-east" })).toHaveTextContent(SECRET);
   });
 });

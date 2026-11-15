@@ -117,8 +117,8 @@ describe("projects", () => {
 describe("installCommands", () => {
   it("builds the three install commands with the server URL and token", () => {
     expect(installCommands("https://vn.example.com/", "vn_enroll_abc")).toEqual([
-      "kubectl create namespace vn-agent",
-      "kubectl -n vn-agent create secret generic vn-agent-enrollment \\\n  --from-literal=server-url=https://vn.example.com --from-literal=token=vn_enroll_abc",
+      "kubectl create namespace vn-agent --dry-run=client -o yaml | kubectl apply -f -",
+      "kubectl -n vn-agent create secret generic vn-agent-enrollment \\\n  --from-literal=server-url=https://vn.example.com --from-literal=token=vn_enroll_abc \\\n  --dry-run=client -o yaml | kubectl apply --server-side --force-conflicts -f -",
       "kubectl apply -f https://vn.example.com/api/v1/agent/manifests/kubernetes.yaml",
     ]);
   });

@@ -1,4 +1,4 @@
-import { fireEvent, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { ClusterPage } from "./ClusterPage";
 import { formatDateTime } from "../lib/format";
@@ -106,6 +106,20 @@ describe("ClusterPage", () => {
     expect(alert).toHaveTextContent("The agent could not read this collection: forbidden");
     expect(alert).toHaveTextContent("nodes is forbidden: cannot list");
     expect(screen.getByRole("link", { name: /Nodes.*collection error/ })).toBeInTheDocument();
+  });
+
+  it("says when a shown cluster is no longer available", async () => {
+    let gone = false;
+    const data = cluster();
+    serve(data, { [`GET /api/v1/projects/prod/clusters/${data.id}`]: () => (gone ? notFound() : jsonResponse(data)) });
+    const { client } = open(data.id);
+    expect(await screen.findByRole("heading", { level: 1, name: data.display_name })).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+
+    gone = true;
+    await act(() => client.refetchQueries());
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(/This cluster is no longer available to you/);
   });
 
   it("shows not found for an unknown cluster or one in another project", async () => {

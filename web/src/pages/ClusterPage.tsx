@@ -104,9 +104,12 @@ export function ClusterPage() {
       <Breadcrumbs items={crumbs} />
       <ClusterHeader cluster={data} />
       <div className="stack">
-        {cluster.error && !isMissing(cluster.error) && (
-          <p className="callout" data-tone="degraded" role="alert">
-            The cluster status could not be refreshed. {cluster.error.message} Showing the status received at{" "}
+        {cluster.error && (
+          <p className="callout" data-tone={isMissing(cluster.error) ? "down" : "degraded"} role="alert">
+            {isMissing(cluster.error)
+              ? "This cluster is no longer available to you: it was removed, or your access changed."
+              : "The cluster status could not be refreshed."}{" "}
+            {cluster.error.message} Showing the status received at{" "}
             {formatDateTime(new Date(cluster.dataUpdatedAt).toISOString())}.
           </p>
         )}

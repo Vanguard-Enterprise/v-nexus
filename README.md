@@ -24,7 +24,9 @@ The user-access half of the second milestone step is also in place: browser sign
 
 Agents can enroll with single-use tokens and hold an authenticated WebSocket connection to the server: they sign a stateless server challenge with their Ed25519 key for a short-lived session token, then connect with the `vn-agent.v1` subprotocol. The server records connections, supersedes an older connection of the same agent, and closes a revoked agent's connection. `vn-agent` enrolls itself, stores its identity in a Kubernetes Secret (or a file on a development host), and reconnects with backoff.
 
-The agent can be packaged and installed: `docker build --target agent` builds the `vn-agent` image, `deploy/kubernetes/vn-agent.yaml` installs it (the server also serves it at `/api/v1/agent/manifests/kubernetes.yaml`), and `scripts/dev-cluster.sh` runs it in a local kind cluster. CLI sign-in and cluster inventory are not implemented yet.
+The agent can be packaged and installed: `docker build --target agent` builds the `vn-agent` image, `deploy/kubernetes/vn-agent.yaml` installs it (the server also serves it at `/api/v1/agent/manifests/kubernetes.yaml`), and `scripts/dev-cluster.sh` runs it in a local kind cluster.
+
+Cluster inventory works end to end: the agent watches nodes, namespaces, deployments, statefulsets, and daemonsets in all namespaces, sanitizes the objects, and sends a snapshot of each collection on every connection, followed by watch events, within the server's acknowledgement window. The server persists them with per-resource ordering, an epoch fence against superseded connections, and deletion inference only from complete snapshots, and serves clusters (with connection, staleness, and per-collection status) and their resources (with filters, pagination, and kind-specific summaries) to project members. CLI sign-in, the agent `status` message, and jobs are not implemented yet.
 
 ## Quick start
 

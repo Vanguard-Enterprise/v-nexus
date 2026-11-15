@@ -195,6 +195,35 @@ psql "$VN_DATABASE_URL" -c 'SELECT agent_id, sync_epoch, opened_at, last_seen_at
 
 When the agent is revoked (close code 4003) or reports a different cluster fingerprint (4010), it logs that it needs to be enrolled again and exits with status 2. Delete the identity file (or Secret) and start it with a new enrollment token. A second agent process with the same identity supersedes the first (4009), and the two keep replacing each other's connection, so run one per identity.
 
+## Collect inventory
+
+Once connected, the agent watches five collections in all namespaces: `v1/nodes`, `v1/namespaces`, `apps/v1/deployments`, `apps/v1/statefulsets`, and `apps/v1/daemonsets`. The kubeconfig user (or the in-cluster service account) needs `get`, `list`, and `watch` on them. Every connection starts with a fresh snapshot of each collection, followed by watch events. The agent removes managed fields, the `kubectl.kubernetes.io/last-applied-configuration` annotation, and environment variable values in pod templates before sending (the server removes them again), and never collects Secrets or ConfigMaps.
+
+A collection the agent may not read is reported as an error with reason `forbidden` and retried with backoff from 1 to 60 seconds. Earlier inventory of that collection stays.
+
+The inventory is in the `inventory_resources` table (one row per cluster and resource UID, with a tombstone in `deleted_at` once the resource is deleted) and the `inventory_collections` table (per-collection snapshot and error state):
+
+```sh
+psql "$VN_DATABASE_URL" -c "SELECT collection, namespace, name, resource_version, deleted_at FROM inventory_resources ORDER BY collection, namespace, name"
+```
+
+Browse it in the web UI, or through the API with a session cookie (`vn_session` when `auth.public_url` uses http, `__Host-vn_session` with https):
+
+```sh
+curl -s -H "cookie: vn_session=$SESSION" http://127.0.0.1:8080/api/v1/projects/<slug>/clusters
+curl -s -H "cookie: vn_session=$SESSION" \
+  "http://127.0.0.1:8080/api/v1/projects/<slug>/clusters/<cluster_id>/resources?collection=apps/v1/deployments&search=web"
+```
+
+The resources endpoint takes `collection`, `namespace`, `search` (a case-insensitive substring of the name), `include_deleted=true`, `limit` (1 to 500, default 100), and the `cursor` from the previous page's `next_cursor`. A cluster is `stale` whenever its agent is not connected; its inventory stays visible.
+
+To try it against a local [kind](https://kind.sigs.k8s.io/) cluster, export a kubeconfig for that cluster only, so the agent cannot reach any other context:
+
+```sh
+kind get kubeconfig --name <cluster> > /tmp/vn-kind.kubeconfig
+KUBECONFIG=/tmp/vn-kind.kubeconfig cargo run -p vn-agent -- --identity-file vn-agent-identity.json
+```
+
 ## Run the server
 
 ```sh
@@ -288,7 +317,7 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
 ```
 
-The Rust build and unit tests do not need a running database. The sign-in and access-control integration tests in `crates/vn-server/tests/auth_flow.rs` run against a mock OIDC provider and a real PostgreSQL, the enrollment and connection tests in `crates/vn-server/tests/agent_enrollment.rs` and `agent_connection.rs`, and the agent's end-to-end tests in `crates/vn-agent/tests/agent_server.rs`, against a real PostgreSQL. They are skipped (with a printed note) unless `DATABASE_URL` is set. Each test creates and drops its own database, so the user needs permission to create databases. With the Compose database:
+The Rust build and unit tests do not need a running database. The sign-in and access-control integration tests in `crates/vn-server/tests/auth_flow.rs` run against a mock OIDC provider and a real PostgreSQL, the enrollment, connection, and inventory tests in `crates/vn-server/tests/agent_enrollment.rs`, `agent_connection.rs`, and `inventory.rs`, and the agent's end-to-end tests in `crates/vn-agent/tests/agent_server.rs`, against a real PostgreSQL. They are skipped (with a printed note) unless `DATABASE_URL` is set. Each test creates and drops its own database, so the user needs permission to create databases. With the Compose database:
 
 ```sh
 DATABASE_URL=postgres://vn:vn@localhost:5432/vn cargo test --workspace --locked

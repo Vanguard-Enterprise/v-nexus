@@ -1,6 +1,6 @@
 # Agent protocol
 
-Status: partly implemented. Connection setup, close codes, the envelope, versioning, session start, and heartbeats are implemented as described here, with the details they settled. Snapshots, observations, acknowledgements, `status`, and jobs are still a sketch: their message names and fields may change in the implementation pull requests. The guarantees stated here must not.
+Status: partly implemented. Connection setup, close codes, the envelope, versioning, session start, heartbeats, collections, snapshots, observations, acknowledgements, and duplicate handling are implemented as described here, with the details they settled. The `status` message and jobs are still a sketch: their message names and fields may change in the implementation pull requests. The guarantees stated here must not.
 
 The decisions behind this protocol are in [Agent synchronization and jobs](architecture.md#agent-synchronization-and-jobs): Ed25519 agent keys, single-use enrollment tokens, and one WebSocket connection per agent.
 
@@ -99,6 +99,8 @@ The server allocates a sync epoch each time it accepts a connection, by atomical
 
 A collection is one resource type, such as `v1/nodes`, `v1/namespaces`, or `apps/v1/deployments`. Its scope is exactly what the agent listed: one namespace or all namespaces. The server stores the scope recorded by the last completed snapshot of each collection.
 
+Version 1 collects `v1/nodes`, `v1/namespaces`, `apps/v1/deployments`, `apps/v1/statefulsets`, and `apps/v1/daemonsets`, in all namespaces. Collection names are strings on the wire: the server answers a collection it does not know with `error { code: "unsupported_collection", ref_seq }` and ignores the message. A scope is `{ "namespace": null }` for all namespaces (and always for cluster-scoped collections) or `{ "namespace": "<name>" }` for one. Version 1 agents send only the first.
+
 Version 1 scopes have no label or field selectors. An existing object never changes namespace, so a resource cannot leave a namespace scope while it exists, and absence from a complete snapshot, or a watch `delete`, means the resource was deleted. A watch with a selector reports an object that stops matching as deleted, so selector scopes need a separate "left scope" state alongside deletion. They can be added later as a capability.
 
 ## Snapshots
@@ -107,11 +109,21 @@ Version 1 scopes have no label or field selectors. An existing object never chan
 | --- | --- |
 | `snapshot_start` | `snapshot_id`, `collection`, `scope` |
 | `upsert` | Observation fields plus `snapshot_id` |
-| `snapshot_end` | `snapshot_id`, `item_count`, list `resource_version` |
+| `snapshot_end` | `snapshot_id`, `item_count`, list `resource_version` (optional) |
 | `snapshot_abort` | `snapshot_id`, `reason` |
-| `collection_error` | `collection`, `scope`, `reason` (for example `forbidden`) |
+| `collection_error` | `collection`, `scope`, `reason` (for example `forbidden`), optional `message` |
 
 Snapshots map to `kube-runtime` watcher events: `Init` starts a snapshot, each `InitApply` becomes an `upsert` in it, and `InitDone` ends it. Later `Apply` and `Delete` events become `upsert` and `delete`. A watcher relist within a connection, for example after an expired resource version, produces a new snapshot. The agent lists with the most recent (quorum read) list semantic.
+
+Implementation details:
+
+- Snapshot IDs are random UUIDs. The agent queues `snapshot_start` when the listing yields its first object or its end, not at `Init`, which the watcher emits before each list attempt. Nothing of this connection's collection comes between `Init` and that point, so the order key of `snapshot_start` still precedes every item. A listing that fails right away sends only its `collection_error`.
+- `item_count` counts the `upsert` messages sent for the snapshot. The agent skips an object without a UID or name, with a warning, and does not count it.
+- `kube-runtime` does not expose the list's resource version, so version 1 agents send `resource_version: null`. The server stores it when present.
+- A listing or watch error reported as `collection_error` aborts an unfinished snapshot first. The agent reports failures to list (`forbidden`, `not_found`, or `list_failed`) and permission or missing-resource failures to start a watch (`forbidden`, `not_found`). An expired resource version (410) relists, which starts a new snapshot, and an interrupted watch stream resumes from its resource version, so neither is reported. A repeated identical failure is reported once, until a completed snapshot or a watch event.
+- After any watcher error the agent waits with its backoff (1 to 60 seconds, with jitter) before the watcher retries. The backoff starts over after a completed listing or a watch event. `kube-runtime`'s own backoff starts over at every `Init`, which would retry a forbidden listing about once a second.
+- The server answers a malformed observation (for example a namespaced collection without a `namespace`, an empty UID or name, or an `upsert` without `object` that is not `truncated`) with `error { code: "invalid_message", ref_seq }` and ignores it. An ignored message does not count toward its snapshot, so that snapshot infers no deletions.
+- A `snapshot_end` whose `item_count` differs from the upserts received records the collection error `snapshot_incomplete`.
 
 Deletion rules:
 
@@ -119,7 +131,7 @@ Deletion rules:
 - At `snapshot_end`, the server marks resources in that collection and scope as deleted when their stored order key is lower than the order key of the `snapshot_start` message. Every `upsert` in the snapshot advances the order key of the resource it names, even when the content is unchanged, so listed resources keep newer keys. Resources updated after the snapshot started also have newer keys.
 - Each inferred deletion leaves a tombstone with the order key of the `snapshot_end` message.
 - An aborted snapshot, a disconnect, a `collection_error`, a count mismatch, or a new `snapshot_start` for the same collection before the end infers no deletions. Upserts already accepted from that snapshot stay applied, because each one is a current observation that passed the ordering rules.
-- Resources outside a narrower scope are not deleted. How they are shown is an open question in the architecture document.
+- Resources outside a narrower scope are not deleted. Following the proposed answer to open question 9 in the architecture document, a completed snapshot with a namespace scope marks the collection's resources in other namespaces as no longer collected (`uncollected_at`), and a later upsert clears that. Version 1 agents only send whole-cluster scopes, so this does not happen yet, and the API does not show it.
 
 ## Observations
 
@@ -129,6 +141,8 @@ Deletion rules:
 | `delete` | `collection`, `uid`, `namespace`, `name`, last known `resource_version`, `observed_at` |
 
 The agent sanitizes objects before sending them. Secret data, managed fields, and other excluded attributes never leave the cluster. The server validates the result again. An object larger than the message limit is sent without its body and with a `truncated` flag, so it still counts toward the snapshot.
+
+Sanitization, shared by the agent and the server (`vn_core::inventory::sanitize_object`), removes `metadata.managedFields`, the `kubectl.kubernetes.io/last-applied-configuration` annotation, the `value` of every environment variable in a pod template (names and `valueFrom` references stay), top-level `data`, `stringData`, and `binaryData`, and a node's `status.images`. Secrets and ConfigMaps are not collected. The agent reads objects as dynamic JSON, so fields newer than its compiled API types are kept, and sets `apiVersion` and `kind`, which list responses leave out. `upsert` leaves out `snapshot_id` for watch events and `truncated` when false. A `delete` for a UID the server never stored leaves a tombstone without content, so a delayed upsert with an older order key cannot add it.
 
 Ordering:
 
@@ -140,10 +154,12 @@ Ordering:
 - Resource version rule: only when `hello` reported a Kubernetes API server version of 1.35 or later, and both resource versions are canonical decimal strings (digits only, no leading zero), the server compares them numerically and rejects content whose resource version is lower than the stored one. A value in any other form falls back to the order key alone. Kubernetes guarantees this ordering only for 1.35 and later API servers, within one resource type, and treats resource versions as opaque on earlier versions. On older clusters the server orders content by order key alone. The rule adds protection against a stale list after a reconnect.
 - An accepted `delete` advances the stored key and replaces the resource with a tombstone that keeps its last known resource version. A replacement with the same name has a new UID and is a new resource.
 - Kubernetes does not reuse UIDs, so an accepted `upsert` for a tombstoned UID that passes the resource version rule means the deletion was wrong. The server applies it, clears the tombstone, logs the anomaly, and increments a counter. An `upsert` with a lower order key is still ignored.
+- The server reads the Kubernetes version as `v<major>.<minor>…` from `hello`'s `kubernetes_version` (suffixes such as `+k3s1` or `-rc.1` are ignored) and compares canonical decimal resource versions by length, then digit by digit, so they need not fit in 64 bits. A tombstone's resource version is the `delete`'s, unless the rule finds it older than the stored one. The counter is `inventory_collections.tombstone_reversals`.
 
 ## Acknowledgements and flow control
 
 - The server sends `ack { seq }` after the transaction containing that message commits. Acknowledgements are cumulative.
+- The window counts inventory messages (`snapshot_start`, `upsert`, `delete`, `snapshot_end`, `snapshot_abort`, `collection_error`), which the server always acknowledges, also when it ignores one with an `error` answer. `hello` and `error` are outside the window: the server does not acknowledge them, and a later acknowledgement covers them.
 - The agent keeps no more unacknowledged messages than the window announced in `welcome`. When the window is full, it stops sending and queues pending messages.
 - Snapshot messages (`snapshot_start`, its `upsert` messages, and `snapshot_end`) stay in order and are never merged or dropped.
 - Coalescing applies only to watch events queued after the collection's latest `snapshot_end`, and never across a snapshot message of the same collection. A newer watch event for the same collection and UID replaces the pending one. A `delete` replaces a pending `upsert`.
@@ -151,6 +167,7 @@ Ordering:
 - Memory is bounded by at most one snapshot's items per collection plus one pending change per resource, not by the event rate.
 - If the agent must discard a snapshot item anyway, for example to stay within a memory limit, it sends `snapshot_abort` for that snapshot and relists the collection to start a new one.
 - The server processes each connection's messages in order and may batch consecutive observations into one transaction. Each ingest transaction checks that the agent is still active (otherwise it closes the connection with code 4003) and applies the epoch fence.
+- The server batches up to 128 consecutive inventory messages, applying a batch 20 milliseconds after its first message at the latest, in one transaction. It locks the source row (`FOR SHARE`) before the agent row, in the same order as connection open and replacement enrollment. It answers ignored messages with `error`, then acknowledges the batch's last `seq`.
 - Acknowledgements are for flow control and durability, not retransmission. TCP delivers messages in order within a connection. After a disconnect, the agent discards unacknowledged observations and reconciles from scratch.
 
 ## Duplicate delivery
@@ -174,6 +191,7 @@ Duplicates come from reconnect snapshots and watcher relists. Messages from a su
 - The agent sends `status` every 30 seconds with each collection's state (`snapshotting`, `watching`, or `error` with a reason) and the time of its last watch event.
 - Connection status belongs to the agent. It is connected while an authenticated connection is open and has carried traffic within 45 seconds, and disconnected since a recorded time otherwise. The server records the connection's last-seen time at most every 30 seconds. A record older than 90 seconds counts as disconnected, which covers a server process that stopped without recording the disconnect.
 - Data freshness belongs to each collection. A collection is current when its agent is connected, a snapshot has completed in this connection, and the latest `status` reports its watch healthy. Otherwise it is stale since the time it stopped being current. The UI shows the last completed snapshot time, the last observation time, and any collection error.
+- Until `status` exists, the inventory API derives a collection's state from server records alone: `error` while a `collection_error` (or `snapshot_incomplete`) is recorded, which a completed snapshot or a later watch event on the same connection clears; `syncing` while a snapshot started on the open connection has not ended; `synced` once a snapshot has completed; otherwise `never_synced`. The whole cluster is `stale` whenever its agent is not connected.
 - Freshness and status use server receive times. The agent's `observed_at` is stored for display but does not decide freshness, so clock skew cannot make data look current.
 
 ## Jobs

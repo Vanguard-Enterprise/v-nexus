@@ -20,13 +20,15 @@ Open [project-priorities.html](project-priorities.html) in a browser for the cur
 
 Early development. The repository contains the application skeleton from the first milestone step: a Rust workspace (server, agent stub, and `vn` CLI), configuration-file validation, PostgreSQL migrations, and a React web UI that reports server health.
 
-The user-access half of the second milestone step is also in place: browser sign-in through an OIDC provider (such as Zitadel), server-side sessions, an installation admin role mapped from a provider claim, and projects with per-project `viewer` and `operator` roles. Every API route except health and sign-in requires a session. CLI sign-in, agent enrollment, and cluster inventory are not implemented yet.
+The user-access half of the second milestone step is also in place: browser sign-in through an OIDC provider (such as Pocket ID), server-side sessions, an installation admin role mapped from a provider claim, and projects with per-project `viewer` and `operator` roles. Every API route except health and sign-in requires a session. Installation admins can create agent enrollment tokens, and agents enroll and can be revoked through the API.
+
+The agent can be packaged and installed: `docker build --target agent` builds the `vn-agent` image, `deploy/kubernetes/vn-agent.yaml` installs it (the server also serves it at `/api/v1/agent/manifests/kubernetes.yaml`), and `scripts/dev-cluster.sh` runs it in a local kind cluster. The agent's connection to the server, cluster inventory, and CLI sign-in are not implemented yet.
 
 ## Quick start
 
 ```sh
 docker compose up -d postgres
-cp config/vn.example.yaml vn.yaml   # then point the auth section at your OIDC provider
+cp config/vn.example.yaml vn.yaml   # then point the auth section at your OIDC provider (Pocket ID)
 export VN_DATABASE_URL=postgres://vn:vn@localhost:5432/vn
 export VN_OIDC_CLIENT_SECRET=...      # client secret from your OIDC provider
 cargo run -p vn-server
@@ -35,4 +37,4 @@ cargo run -p vn-server
 pnpm --dir web install && pnpm --dir web dev
 ```
 
-See [docs/development.md](docs/development.md) for prerequisites, setting up a local OIDC provider, tests, and container builds.
+See [docs/development.md](docs/development.md) for prerequisites, setting up Pocket ID for sign-in, running the agent in a local cluster, tests, and container builds.

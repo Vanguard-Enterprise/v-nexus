@@ -7,6 +7,7 @@ This guide covers running Vanguard Nexus from a source checkout.
 - [rustup](https://rustup.rs). The toolchain version is pinned in `rust-toolchain.toml`, and rustup installs it on first use (or run `rustup toolchain install` in the repository root).
 - Node.js 24 with Corepack. Run `corepack enable` once so the pnpm version pinned in `web/package.json` is used.
 - Docker with the Compose plugin, for PostgreSQL and container builds.
+- To run the agent in a local cluster: [kind](https://kind.sigs.k8s.io) (`go install sigs.k8s.io/kind@latest`, which puts it in `$(go env GOPATH)/bin`) and `kubectl`.
 
 ## Start PostgreSQL
 
@@ -55,15 +56,17 @@ export VN_OIDC_CLIENT_SECRET=<client secret>
 
 The provider must sign ID tokens with an asymmetric algorithm (RS*, PS*, ES*, or EdDSA). VN rejects ID tokens signed with a shared-secret algorithm (HS256, HS384, or HS512), because their integrity would rest on the client secret; configure the provider to use RS256 if it offers a choice. When an ID token names a signing key VN has not seen, VN fetches the provider's keys again once, so key rotation needs no restart.
 
-### Zitadel
+### Pocket ID
 
-1. In a Zitadel project, create a role with key `vn-admin` and grant it to your user.
-2. In the project settings, enable **Assert Roles on Authentication**. Zitadel then reports the user's roles in the `urn:zitadel:iam:org:project:roles` claim, which the example config maps to `admin`.
-3. Add an application of type **Web** with authentication method **Code**. Register the redirect URI `<public_url>/api/v1/auth/callback`. For an `http://` development URL, turn on **Development Mode** in the application settings.
-4. Optionally enable **User roles inside ID Token** in the application's token settings. Otherwise VN reads the roles claim from the userinfo endpoint at sign-in.
-5. Copy the client ID into `auth.client_id` and the client secret into `VN_OIDC_CLIENT_SECRET`, and set `auth.issuer_url` to your Zitadel instance URL.
+[Pocket ID](https://pocket-id.org) is the provider this project develops and deploys against. These steps assume an instance at `https://id.example.com`; use your own URL.
 
-Other providers work the same way. For providers that put group names in a `groups` claim (Keycloak, Authentik, and others), set `admin.claim: groups`, list the admin group in `admin.values`, and add any scope the provider needs to release the claim to `auth.scopes`.
+1. Sign in to Pocket ID as an admin. Under **Administration**, open **User Groups** and add a group with the name `vn-admins`, then add your user to it. Pocket ID reports each group's name (not its friendly name) in the `groups` claim, which the example config maps to the installation `admin` role.
+2. Open **OIDC Clients** and add a client, for example named `Vanguard Nexus`. Set the callback URL to `<public_url>/api/v1/auth/callback`, for example `http://<host>:5173/api/v1/auth/callback` with the Vite dev server. Leave **Public Client** off, since VN is a confidential client with a client secret, and turn **PKCE** on.
+3. Save the client. Copy the client ID into `auth.client_id`, and the client secret, which is shown only once, into `VN_OIDC_CLIENT_SECRET`.
+4. Set `auth.issuer_url` to the Pocket ID URL (`https://id.example.com`, without a trailing slash). The example config already sets `admin.claim: groups` and `admin.values: [vn-admins]`, and requests the `groups` scope in `auth.scopes`. Pocket ID leaves the `groups` claim out unless that scope is requested, so keep it there.
+5. Optionally restrict the client to selected user groups in its settings, so only members of those groups can sign in to VN at all.
+
+Other OpenID Connect providers work the same way. Point `issuer_url` at the provider, set `admin.claim` to the claim that carries its groups or roles, and add any scope it needs to release that claim to `auth.scopes`.
 
 ### Sessions and roles
 
@@ -184,6 +187,58 @@ Both development servers bind to `0.0.0.0`, so they are reachable from other mac
 
 To have the Rust server serve the UI itself, build it once with `pnpm --dir web build`. The example config points `server.static_dir` at `web/dist`.
 
+## Run the agent
+
+The agent runs inside a Kubernetes cluster, enrolls with a token, and keeps its identity in a Secret. Its connection code (`vn-agent` enrolling, connecting, and streaming inventory) lands in a separate pull request. Until then the image starts, logs its settings, and exits, so the pod restarts repeatedly; the image build, the install manifest, and the local cluster below work already.
+
+### Local cluster
+
+`scripts/dev-cluster.sh` manages a [kind](https://kind.sigs.k8s.io) cluster named `vn-dev` for agent development. Every `kubectl` call it makes uses the `kind-vn-dev` context, and it switches the current context back after creating the cluster, so other clusters in your kubeconfig are not affected.
+
+```sh
+scripts/dev-cluster.sh up     # create the cluster if missing, build the agent image, load it
+scripts/dev-cluster.sh load   # rebuild and reload the image, restart the agent if installed
+scripts/dev-cluster.sh down   # delete the cluster
+```
+
+The image is tagged `ghcr.io/vanguard-enterprise/vn-agent:latest`, the tag the install manifest uses, and loaded straight into the cluster's node. The manifest's `imagePullPolicy: IfNotPresent` then uses the loaded image instead of pulling it.
+
+The agent pod cannot reach the server at `127.0.0.1`, which is the pod itself. Give it an address of the host that the kind node container can reach: the host's LAN address or its VPN address, such as its NetBird IP (`netbird status` prints it). The server must listen on that address, so keep `server.listen: 0.0.0.0:8080` (the example config already does), and allow port 8080 through the host firewall if one is active. Over plain http, use only a trusted network such as a LAN or NetBird.
+
+### Install the agent
+
+1. Start the server and sign in as an installation admin.
+2. Create an enrollment token for a new cluster (see [Create an enrollment token](#create-an-enrollment-token)) and copy its `secret`.
+3. Create the namespace and the enrollment Secret, then apply the manifest. `<VN public URL>` is the URL the agent uses to reach the server, for example `http://<NetBird IP>:8080` with the local cluster:
+
+   ```sh
+   kubectl create namespace vn-agent
+   kubectl -n vn-agent create secret generic vn-agent-enrollment \
+     --from-literal=server-url=<VN public URL> --from-literal=token=<token>
+   kubectl apply -f <VN public URL>/api/v1/agent/manifests/kubernetes.yaml
+   ```
+
+   With the local cluster, add `--context kind-vn-dev` to each command. `kubectl apply -f deploy/kubernetes/vn-agent.yaml` applies the same manifest from the checkout.
+
+The server serves the manifest at `GET /api/v1/agent/manifests/kubernetes.yaml` without a session. It is `deploy/kubernetes/vn-agent.yaml`, embedded in the server binary at build time. It creates:
+
+- the `vn-agent` namespace, enforcing the `restricted` Pod Security Standard;
+- the `vn-agent` ServiceAccount;
+- a ClusterRole that can only get, list, and watch nodes, namespaces, deployments, statefulsets, and daemonsets (reading the `kube-system` namespace gives the cluster fingerprint);
+- a Role in `vn-agent` that can get and update the `vn-agent-identity` Secret, create Secrets in that namespace (Kubernetes cannot limit `create` to one name), and get the `vn-agent-enrollment` Secret;
+- a single-replica Deployment that runs as a non-root user with a read-only root filesystem, no privilege escalation, and all capabilities dropped. It reads `VN_SERVER_URL` from the `server-url` key and `VN_ENROLLMENT_TOKEN` from the optional `token` key of `vn-agent-enrollment`, and sets `POD_NAMESPACE`, which tells the agent to keep its identity in the `vn-agent-identity` Secret.
+
+After the first enrollment the token is used up and the agent works from its stored identity; the `token` key may then be removed. Check on the agent with:
+
+```sh
+kubectl --context kind-vn-dev -n vn-agent logs deployment/vn-agent
+kubectl --context kind-vn-dev -n vn-agent get secret vn-agent-identity
+```
+
+To enroll the cluster again, for example after revoking its agent, create a `replace_source` token, put it in `vn-agent-enrollment`, delete the `vn-agent-identity` Secret, and restart the Deployment. Remove the agent with `kubectl delete -f deploy/kubernetes/vn-agent.yaml`, which also deletes the namespace and both Secrets.
+
+The image is not published to a registry yet. For a cluster other than the local one, build it (see [Build and run the container](#build-and-run-the-container)), push it to a registry the cluster can pull from, and change the Deployment's image to match.
+
 ## Run tests and checks
 
 These match the CI workflow in `.github/workflows/ci.yml`.
@@ -216,10 +271,11 @@ pnpm --dir web build
 
 ## Build and run the container
 
-The `Dockerfile` builds the web UI and the `vn-server` and `vn` binaries, then packages them in a slim image that runs as a non-root user.
+The `Dockerfile` builds the web UI and the `vn-server` and `vn` binaries, then packages them in a slim image that runs as a non-root user. Its `agent` target builds the agent image instead: only the `vn-agent` binary on a distroless base, running as a non-root user.
 
 ```sh
 docker build -t vanguard-nexus .
+docker build --target agent -t ghcr.io/vanguard-enterprise/vn-agent:latest .
 ```
 
 The image includes a default config at `/etc/vn/vn.yaml` (`VN_CONFIG`) that listens on `0.0.0.0:8080`, serves the UI from `/usr/share/vn/web`, and reads the database URL from `VN_DATABASE_URL`. It has no `auth` section, so sign-in is disabled. Mount your own file at `/etc/vn/vn.yaml` with an `auth` section, and pass `VN_OIDC_CLIENT_SECRET`, to enable it.

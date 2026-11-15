@@ -68,3 +68,13 @@ auth:
   session:
     idle_timeout_minutes: 60
     absolute_timeout_minutes: 720
+
+# Agent connections. Optional: without this section agents can still enroll, but the
+# agent challenge, session, and connect endpoints answer 503, so no agent can connect.
+agents:
+  # Name of the environment variable that holds the challenge key: base64 of 32 to 64
+  # random bytes, for example from `openssl rand -base64 32`. VN keys the MAC of its
+  # stateless session challenges with it. Every server replica needs the same key.
+  # Changing it invalidates only challenges that are still outstanding. The key itself
+  # never goes in this file and is never logged.
+  challenge_key_env: VN_AGENT_CHALLENGE_KEY

@@ -113,6 +113,9 @@ fn validate_config(path: &std::path::Path, check_env: bool) -> anyhow::Result<()
         if let Some(auth) = &config.auth {
             auth.resolve_client_secret()?;
         }
+        if let Some(agents) = &config.agents {
+            agents.resolve_challenge_key()?;
+        }
     }
     println!("{}: valid (version {})", path.display(), config.version);
     Ok(())

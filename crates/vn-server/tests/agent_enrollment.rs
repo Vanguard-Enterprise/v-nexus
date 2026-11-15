@@ -141,7 +141,7 @@ auth:
             .unwrap();
         // Provider discovery is lazy, so no provider is needed while nobody signs in.
         let state = AppState::new(db.pool.clone())
-            .with_auth(AuthService::new(&auth, &secret).unwrap())
+            .with_auth(AuthService::new(&auth, secret.as_ref()).unwrap())
             .with_trusted_proxies(trusted_proxies)
             .with_enroll_body_timeout(BODY_TIMEOUT);
         let app = router(state, None);

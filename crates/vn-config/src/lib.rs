@@ -3,8 +3,8 @@
 //! The file is YAML with an explicit schema `version`. Unknown fields are rejected so that
 //! typos fail loudly instead of being ignored. Secrets are never stored in the file: the
 //! database connection URL is read from the environment variable named by
-//! `database.url_env`, and the OIDC client secret from the one named by
-//! `auth.client_secret_env`.
+//! `database.url_env`, and the OIDC client secret, for confidential clients, from the one
+//! named by `auth.client_secret_env`.
 
 use std::fmt;
 use std::net::SocketAddr;
@@ -144,8 +144,11 @@ pub struct AuthConfig {
     pub issuer_url: String,
     /// Client ID registered with the provider.
     pub client_id: String,
-    /// Name of the environment variable holding the client secret.
-    pub client_secret_env: String,
+    /// Name of the environment variable holding the client secret. Omit it for a public
+    /// client, which authenticates the code exchange with PKCE alone. Providers such as
+    /// Pocket ID offer public clients for applications that hold no secret.
+    #[serde(default)]
+    pub client_secret_env: Option<String>,
     /// Origin browsers use to reach VN, for example `https://vn.example.com`. The OIDC
     /// redirect URI is `<public_url>/api/v1/auth/callback`, session cookies are marked
     /// `Secure` when it uses https, and state-changing requests must come from this origin.
@@ -337,13 +340,14 @@ impl AuthConfig {
         if self.client_id.trim().is_empty() {
             return Err(invalid("auth.client_id", "must not be empty"));
         }
-        if !is_env_var_name(&self.client_secret_env) {
+        if let Some(var) = &self.client_secret_env
+            && !is_env_var_name(var)
+        {
             return Err(ConfigError::Invalid {
                 field: "auth.client_secret_env",
                 message: format!(
-                    "`{}` is not a valid environment variable name \
-                     (use letters, digits, and underscores, not starting with a digit)",
-                    self.client_secret_env
+                    "`{var}` is not a valid environment variable name \
+                     (use letters, digits, and underscores, not starting with a digit)"
                 ),
             });
         }
@@ -450,8 +454,9 @@ impl AuthConfig {
         url::Url::parse(&self.issuer_url).is_ok_and(|issuer| issuer.scheme() == "http")
     }
 
-    /// Reads the client secret from the process environment.
-    pub fn resolve_client_secret(&self) -> Result<Secret, ConfigError> {
+    /// Reads the client secret from the process environment. Returns `None` for a public
+    /// client, which has no `client_secret_env`.
+    pub fn resolve_client_secret(&self) -> Result<Option<Secret>, ConfigError> {
         self.resolve_client_secret_with(|name| {
             std::env::var_os(name).map(|v| v.to_string_lossy().into())
         })
@@ -461,9 +466,11 @@ impl AuthConfig {
     pub fn resolve_client_secret_with(
         &self,
         lookup: impl FnOnce(&str) -> Option<String>,
-    ) -> Result<Secret, ConfigError> {
+    ) -> Result<Option<Secret>, ConfigError> {
         let field = "auth.client_secret_env";
-        let var = &self.client_secret_env;
+        let Some(var) = &self.client_secret_env else {
+            return Ok(None);
+        };
         match lookup(var) {
             None => Err(ConfigError::EnvVarMissing {
                 field,
@@ -473,7 +480,7 @@ impl AuthConfig {
                 field,
                 var: var.clone(),
             }),
-            Some(value) => Ok(Secret(value)),
+            Some(value) => Ok(Some(Secret(value))),
         }
     }
 }
@@ -865,7 +872,10 @@ auth:
         let auth = auth(WITH_AUTH);
         assert_eq!(auth.issuer_url, "https://id.example.com");
         assert_eq!(auth.client_id, "1234@vn");
-        assert_eq!(auth.client_secret_env, "VN_OIDC_CLIENT_SECRET");
+        assert_eq!(
+            auth.client_secret_env.as_deref(),
+            Some("VN_OIDC_CLIENT_SECRET")
+        );
         assert_eq!(auth.public_origin(), "https://vn.example.com");
         assert_eq!(
             auth.redirect_url(),
@@ -1096,6 +1106,7 @@ auth:
                 assert_eq!(name, "VN_OIDC_CLIENT_SECRET");
                 Some("s3cr3t-value".into())
             })
+            .unwrap()
             .unwrap();
         assert_eq!(secret.expose(), "s3cr3t-value");
         assert!(!format!("{secret:?} {secret} {auth:?}").contains("s3cr3t"));
@@ -1113,6 +1124,16 @@ auth:
             auth.resolve_client_secret_with(|_| Some(" ".into())),
             Err(ConfigError::EnvVarEmpty { .. })
         ));
+    }
+
+    #[test]
+    fn public_client_has_no_secret_to_resolve() {
+        let auth = auth(&WITH_AUTH.replace("  client_secret_env: VN_OIDC_CLIENT_SECRET\n", ""));
+        assert_eq!(auth.client_secret_env, None);
+        let secret = auth
+            .resolve_client_secret_with(|name| panic!("looked up {name}"))
+            .unwrap();
+        assert!(secret.is_none());
     }
 
     #[test]

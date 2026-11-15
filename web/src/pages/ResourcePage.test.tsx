@@ -1,4 +1,4 @@
-import { screen, within } from "@testing-library/react";
+import { act, screen, within } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { ResourcePage } from "./ResourcePage";
 import { DISCONNECTED, PROJECT, cluster, deployment } from "../test/fixtures";
@@ -43,6 +43,41 @@ describe("ResourcePage", () => {
 
     expect(await screen.findByText(/was deleted from the cluster/)).toBeInTheDocument();
     expect(await screen.findByText(/The cluster is disconnected/)).toBeInTheDocument();
+  });
+
+  it("warns that a truncated object holds only its identity", async () => {
+    serveApi({
+      "GET /api/v1/projects/prod": () => jsonResponse(PROJECT),
+      "GET /api/v1/projects/prod/clusters/c1": () => jsonResponse(cluster()),
+      "GET /api/v1/projects/prod/clusters/c1/resources/r-api": () =>
+        jsonResponse({ ...deployment("api", { truncated: true }), object: OBJECT }),
+    });
+    renderPage(<ResourcePage />, page);
+
+    expect(await screen.findByText(/larger than the agent's message size limit/)).toBeInTheDocument();
+    expect(screen.queryByText(/as last reported by the agent/)).not.toBeInTheDocument();
+  });
+
+  it("keeps the last resource on screen and says when a refresh fails", async () => {
+    let failing = false;
+    serveApi({
+      "GET /api/v1/projects/prod": () => jsonResponse(PROJECT),
+      "GET /api/v1/projects/prod/clusters/c1": () => jsonResponse(cluster()),
+      "GET /api/v1/projects/prod/clusters/c1/resources/r-api": () =>
+        failing
+          ? jsonResponse({ error: "internal", message: "database unavailable" }, 500)
+          : jsonResponse({ ...deployment("api"), object: OBJECT }),
+    });
+    const { client } = renderPage(<ResourcePage />, page);
+    expect(await screen.findByRole("heading", { level: 1, name: "api" })).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+
+    failing = true;
+    await act(() => client.refetchQueries());
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(/The resource could not be refreshed/);
+    expect(screen.getByRole("heading", { level: 1, name: "api" })).toBeInTheDocument();
+    expect(screen.queryByText(/larger than the agent's message size limit/)).not.toBeInTheDocument();
   });
 
   it("shows not found", async () => {

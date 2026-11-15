@@ -115,6 +115,12 @@ describe("fetchResources", () => {
   it("rejects a page with a malformed resource", () => {
     expect(parseResourcePage({ resources: [{ ...deployment("x"), state: "gone" }], next_cursor: null })).toBeUndefined();
     expect(parseResourcePage({ resources: [] })).toBeUndefined();
+    expect(parseResourcePage({ resources: [{ ...deployment("x"), truncated: "yes" }], next_cursor: null })).toBeUndefined();
+  });
+
+  it("keeps the truncation flag, reading it as false when absent", () => {
+    const page = parseResourcePage({ resources: [{ ...deployment("big"), truncated: true }, deployment("small")], next_cursor: null });
+    expect(page?.resources.map((r) => r.truncated)).toEqual([true, false]);
   });
 });
 

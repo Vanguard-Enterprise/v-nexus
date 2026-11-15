@@ -271,6 +271,8 @@ export interface Resource {
   first_observed_at: string;
   last_observed_at: string;
   deleted_at: string | null;
+  /** The object was over the agent's message size limit, so only its identity is stored. */
+  truncated: boolean;
   summary: ResourceSummary;
 }
 
@@ -299,6 +301,7 @@ export function parseResource(value: unknown): Resource | undefined {
     first_observed_at,
     last_observed_at,
     deleted_at,
+    truncated = false,
   } = body;
   if (
     !isString(id) ||
@@ -311,7 +314,8 @@ export function parseResource(value: unknown): Resource | undefined {
     !isOneOf(state, RESOURCE_STATES) ||
     !isString(first_observed_at) ||
     !isString(last_observed_at) ||
-    !isOptionalString(deleted_at)
+    !isOptionalString(deleted_at) ||
+    typeof truncated !== "boolean"
   ) {
     return undefined;
   }
@@ -327,6 +331,7 @@ export function parseResource(value: unknown): Resource | undefined {
     first_observed_at,
     last_observed_at,
     deleted_at,
+    truncated,
     summary: parseSummary(collection, body.summary),
   };
 }

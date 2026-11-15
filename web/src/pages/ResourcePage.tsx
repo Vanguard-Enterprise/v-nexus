@@ -9,6 +9,7 @@ import { ErrorState } from "../components/ErrorState";
 import { Missing } from "../components/Missing";
 import { StatusBadge } from "../components/StatusBadge";
 import { Timestamp } from "../components/Timestamp";
+import { formatDateTime } from "../lib/format";
 import { clusterPath, collectionLabel, projectPath } from "../lib/labels";
 import { useDocumentTitle } from "../lib/title";
 
@@ -64,6 +65,12 @@ export function ResourcePage() {
         </p>
       </div>
       <div className="stack">
+        {resource.error && (
+          <p className="callout" data-tone="degraded" role="alert">
+            The resource could not be refreshed. {resource.error.message} Showing the resource received at{" "}
+            {formatDateTime(new Date(resource.dataUpdatedAt).toISOString())}.
+          </p>
+        )}
         {data.state === "deleted" && (
           <div className="callout" data-tone="degraded" role="status">
             <p>
@@ -194,7 +201,14 @@ function ObjectPanel({ resource, json }: { resource: ResourceDetail; json: strin
         <h2 id="object-heading">Object</h2>
         <CopyButton text={json} label={`${resource.kind} ${resource.name} as JSON`} caption="Copy JSON" />
       </header>
-      <p className="panel__message muted">The sanitized Kubernetes object, as last reported by the agent.</p>
+      {resource.truncated ? (
+        <p className="panel__message callout" data-tone="degraded" role="status">
+          This object was larger than the agent's message size limit, so only its identity was stored. Its spec and
+          status are not available.
+        </p>
+      ) : (
+        <p className="panel__message muted">The sanitized Kubernetes object, as last reported by the agent.</p>
+      )}
       <pre className="json" tabIndex={0} aria-label={`${resource.kind} ${resource.name} as JSON`}>
         <code>{json}</code>
       </pre>

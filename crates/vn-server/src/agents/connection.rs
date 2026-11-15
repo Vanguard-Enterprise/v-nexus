@@ -4,7 +4,8 @@
 //! authenticates the session token, answering failures with an HTTP status and a JSON
 //! error. After upgrading it allocates a sync epoch and records the connection in one
 //! transaction that also closes any older connection of the agent, sends `welcome`,
-//! waits for `hello`, and then hands every message to the [`Dispatcher`].
+//! waits for `hello`, and then hands every message to the [`Dispatcher`], which batches
+//! inventory messages and applies a batch when [`Dispatcher::flush_deadline`] passes.
 //!
 //! A connection closes when the agent is revoked (notification or periodic recheck),
 //! when a newer connection supersedes it, on a protocol error, after
@@ -416,6 +417,7 @@ impl Connection {
 
         loop {
             let idle_deadline = self.last_traffic + settings.idle_timeout;
+            let flush_at = dispatcher.as_ref().and_then(Dispatcher::flush_deadline);
             let step: Result<(), Ending> = tokio::select! {
                 control = control.recv() => match control {
                     Some(Control::Close(code, reason)) => {
@@ -458,6 +460,17 @@ impl Connection {
                 () = &mut hello_deadline, if dispatcher.is_none() => Err(Ending::Server(
                     Close::protocol("no `hello` within the time limit"),
                 )),
+                () = tokio::time::sleep_until(flush_at.unwrap_or(idle_deadline)),
+                    if flush_at.is_some() =>
+                {
+                    match dispatcher.as_mut() {
+                        Some(dispatcher) => dispatcher
+                            .flush(ctx, &mut self.outbound())
+                            .await
+                            .map_err(Ending::Server),
+                        None => Ok(()),
+                    }
+                }
             };
             if let Err(ending) = step {
                 return ending;

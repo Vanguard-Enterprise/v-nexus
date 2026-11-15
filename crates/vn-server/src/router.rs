@@ -18,8 +18,8 @@ use crate::agents::{self, AgentConnectionSettings, AgentTasks, ChallengeKey, Con
 use crate::auth::{self, AuthService};
 use crate::error::api_error;
 use crate::health::{DatabaseHealth, health};
-use crate::projects;
 use crate::rate_limit::{RateLimit, RateLimiter};
+use crate::{inventory, projects};
 
 /// Enrollment attempts per client address: a burst of 10, then one every 6 seconds.
 /// Successful enrollments do not count.
@@ -171,6 +171,19 @@ pub fn router(state: AppState, static_dir: Option<&Path>) -> Router {
             post(agents::revoke_token),
         )
         .route("/projects/{slug}/agents", get(agents::list))
+        .route("/projects/{slug}/clusters", get(inventory::list_clusters))
+        .route(
+            "/projects/{slug}/clusters/{cluster_id}",
+            get(inventory::show_cluster),
+        )
+        .route(
+            "/projects/{slug}/clusters/{cluster_id}/resources",
+            get(inventory::list_resources),
+        )
+        .route(
+            "/projects/{slug}/clusters/{cluster_id}/resources/{resource_id}",
+            get(inventory::show_resource),
+        )
         .route(
             "/projects/{slug}/agents/{agent_id}/revoke",
             post(agents::revoke),

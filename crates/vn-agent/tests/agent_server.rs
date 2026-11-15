@@ -19,8 +19,11 @@ use uuid::Uuid;
 use vn_agent::backoff::Backoff;
 use vn_agent::client::ServerClient;
 use vn_agent::cluster::ClusterInfo;
+use vn_agent::collect::{Collect, Limits, Mapper, Observed};
 use vn_agent::identity::{Identity, IdentityStore};
+use vn_agent::queue::SyncQueue;
 use vn_agent::runner::{Runner, Stop};
+use vn_core::inventory::Collection;
 use vn_server::{AgentConnectionSettings, AgentTasks, AppState, AuthService, router};
 
 const ISSUER: &str = "https://id.example.com";
@@ -339,5 +342,121 @@ async fn the_agent_closes_cleanly_on_shutdown() {
     stop_tx.send(true).unwrap();
     assert_eq!(stopped(run).await, Stop::Shutdown);
     assert_eq!(h.close_code(connection).await, Some(1000));
+    h.finish().await;
+}
+
+/// Reports a fixed listing of `nodes` nodes on every connection, then one watch event,
+/// through the real event mapping and queue.
+struct FakeCollector {
+    nodes: usize,
+    starts: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl Collect for FakeCollector {
+    fn start(&self, queue: SyncQueue, limits: Limits) -> tokio::task::JoinSet<()> {
+        let generation = self
+            .starts
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
+        let nodes = self.nodes;
+        let mut tasks = tokio::task::JoinSet::new();
+        tasks.spawn(async move {
+            let mut mapper = Mapper::new(Collection::Nodes, limits);
+            let node = |i: usize| {
+                json!({"metadata": {
+                    "name": format!("node-{i}"),
+                    "uid": format!("uid-{i}"),
+                    "resourceVersion": format!("{generation}"),
+                }})
+            };
+            let mut events = vec![Observed::Init];
+            events.extend((0..nodes).map(|i| Observed::InitApply(node(i))));
+            events.push(Observed::InitDone);
+            events.push(Observed::Delete(node(0)));
+            for event in events {
+                queue.update(|q| mapper.on(event, q, chrono::Utc::now()));
+                tokio::task::yield_now().await;
+            }
+            std::future::pending::<()>().await;
+        });
+        tasks
+    }
+}
+
+#[tokio::test]
+async fn the_agent_sends_inventory_within_the_window_and_resyncs_on_reconnect() {
+    let h = harness!(Harness::start(AgentConnectionSettings {
+        ack_window: 1,
+        ..fast()
+    }));
+    let dir = tempfile::tempdir().unwrap();
+    let identity = h.enroll(&dir).await;
+    let agent_id = identity.agent_id;
+    let source_id = identity.source_id;
+    let starts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (stop_tx, stop) = watch::channel(false);
+    let runner = h
+        .runner(identity, FINGERPRINT)
+        .with_collector(FakeCollector {
+            nodes: 40,
+            starts: starts.clone(),
+        });
+    let run = tokio::spawn(runner.run(stop));
+
+    // 40 nodes listed, then node-0 deleted by a watch event, one message at a time.
+    let synced = |generation: &'static str| {
+        let pool = h.pool.clone();
+        async move {
+            for _ in 0..400 {
+                let (present, deleted, version): (i64, i64, Option<String>) = sqlx::query_as(
+                    "SELECT count(*) FILTER (WHERE deleted_at IS NULL), \
+                            count(*) FILTER (WHERE deleted_at IS NOT NULL), \
+                            max(resource_version) \
+                     FROM inventory_resources WHERE source_id = $1",
+                )
+                .bind(source_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+                if present == 39 && deleted == 1 && version.as_deref() == Some(generation) {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            panic!("the inventory did not sync (generation {generation})");
+        }
+    };
+    synced("1").await;
+    let (first, _) = h.open_connection(agent_id, 1).await;
+
+    // A new connection restarts collection with a new snapshot, which reconciles: the
+    // snapshot lists node-0 again, then the watch deletes it again.
+    sqlx::query("UPDATE agent_connections SET closed_at = now(), close_code = 4009 WHERE id = $1")
+        .bind(first)
+        .execute(&h.pool)
+        .await
+        .unwrap();
+    h.open_connection(agent_id, 2).await;
+    synced("2").await;
+    assert_eq!(starts.load(std::sync::atomic::Ordering::SeqCst), 2);
+    let rows: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM inventory_resources WHERE source_id = $1")
+            .bind(source_id)
+            .fetch_one(&h.pool)
+            .await
+            .unwrap();
+    assert_eq!(rows, 40, "no duplicates after the resync");
+    let completed: Option<i64> = sqlx::query_scalar(
+        "SELECT snapshot_item_count FROM inventory_collections \
+         WHERE source_id = $1 AND collection = 'v1/nodes'",
+    )
+    .bind(source_id)
+    .fetch_one(&h.pool)
+    .await
+    .unwrap();
+    assert_eq!(completed, Some(40));
+
+    stop_tx.send(true).unwrap();
+    assert_eq!(stopped(run).await, Stop::Shutdown);
     h.finish().await;
 }

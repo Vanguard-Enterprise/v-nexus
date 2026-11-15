@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-use axum::extract::rejection::{JsonRejection, PathRejection};
+use axum::extract::rejection::{JsonRejection, PathRejection, QueryRejection};
 use axum::extract::{FromRequest, FromRequestParts, Request};
 use axum::http::StatusCode;
 use axum::http::request::Parts;
@@ -130,5 +130,27 @@ where
 }
 
 fn path_rejection(rejection: &PathRejection) -> ApiFailure {
+    ApiFailure::new(rejection.status(), "invalid_request", rejection.body_text())
+}
+
+/// Query parameters whose rejections use the API error shape.
+pub(crate) struct ApiQuery<T>(pub T);
+
+impl<S, T> FromRequestParts<S> for ApiQuery<T>
+where
+    S: Send + Sync,
+    T: DeserializeOwned + Send,
+{
+    type Rejection = ApiFailure;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        match extract::Query::<T>::from_request_parts(parts, state).await {
+            Ok(extract::Query(value)) => Ok(Self(value)),
+            Err(rejection) => Err(query_rejection(&rejection)),
+        }
+    }
+}
+
+fn query_rejection(rejection: &QueryRejection) -> ApiFailure {
     ApiFailure::new(rejection.status(), "invalid_request", rejection.body_text())
 }

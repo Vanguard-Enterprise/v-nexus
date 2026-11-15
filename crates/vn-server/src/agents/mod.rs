@@ -8,6 +8,7 @@ mod connection;
 mod dispatch;
 mod enroll;
 mod hub;
+mod ingest;
 pub(crate) mod manifest;
 mod session;
 mod token;

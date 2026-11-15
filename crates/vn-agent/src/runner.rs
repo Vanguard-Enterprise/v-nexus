@@ -11,6 +11,7 @@ use vn_core::{AgentSession, SessionRequest, session_signing_message};
 use crate::backoff::Backoff;
 use crate::client::{CallError, ServerClient};
 use crate::cluster::ClusterInfo;
+use crate::collect::Collect;
 use crate::connection::{self, Outcome};
 use crate::identity::Identity;
 
@@ -35,6 +36,7 @@ pub struct Runner {
     identity: Identity,
     key: SigningKey,
     cluster: ClusterInfo,
+    collector: Option<Box<dyn Collect>>,
     backoff: Backoff,
 }
 
@@ -50,8 +52,16 @@ impl Runner {
             identity,
             key,
             cluster,
+            collector: None,
             backoff: Backoff::default(),
         })
+    }
+
+    /// Collects inventory with `collector` on every connection. Without one the agent
+    /// only keeps its connection open.
+    pub fn with_collector(mut self, collector: impl Collect + 'static) -> Self {
+        self.collector = Some(Box::new(collector));
+        self
     }
 
     /// Uses `backoff` instead of the default 1 to 60 seconds, so tests reconnect fast.
@@ -96,7 +106,16 @@ impl Runner {
                 .as_ref()
                 .map(|s| s.token.clone())
                 .unwrap_or_default();
-            match connection::run(&self.server, &token, &self.cluster, &mut shutdown).await {
+            let collector = self.collector.as_deref();
+            match connection::run(
+                &self.server,
+                &token,
+                &self.cluster,
+                collector,
+                &mut shutdown,
+            )
+            .await
+            {
                 Outcome::Reconnect { healthy } => {
                     if healthy {
                         self.backoff.reset();

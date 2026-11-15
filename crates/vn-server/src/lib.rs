@@ -7,6 +7,7 @@ mod authz;
 mod client_addr;
 mod error;
 mod health;
+mod inventory;
 mod projects;
 mod rate_limit;
 mod router;

@@ -18,7 +18,7 @@ vn-server = { path = "crates/vn-server" }
 anyhow = "1.0.104"
 axum = { version = "0.8.9", features = ["ws"] }
 axum-extra = { version = "0.12.6", default-features = false, features = ["cookie"] }
-base64 = "0.22.1"
+base64 = "0.23.1"
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "serde", "std"] }
 clap = { version = "4.6.7", features = ["derive", "env"] }
 cookie = "0.18.1"

@@ -4101,7 +4101,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
- "base64 0.22.1",
+ "base64 0.23.1",
  "chrono",
  "clap",
  "ed25519-dalek",
@@ -4147,7 +4147,7 @@ dependencies = [
 name = "vn-config"
 version = "0.1.0"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "ipnet",
  "serde",
  "serde_norway",
@@ -4172,7 +4172,7 @@ dependencies = [
  "anyhow",
  "axum",
  "axum-extra",
- "base64 0.22.1",
+ "base64 0.23.1",
  "chrono",
  "clap",
  "cookie",

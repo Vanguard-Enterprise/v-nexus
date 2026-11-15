@@ -115,7 +115,8 @@ pub(crate) struct AuthorizationStart {
 pub(crate) struct Oidc {
     issuer: IssuerUrl,
     client_id: ClientId,
-    client_secret: ClientSecret,
+    /// `None` for a public client, which authenticates the code exchange with PKCE alone.
+    client_secret: Option<ClientSecret>,
     redirect_url: RedirectUrl,
     scopes: Vec<Scope>,
     admin: AdminMapping,
@@ -124,7 +125,10 @@ pub(crate) struct Oidc {
 }
 
 impl Oidc {
-    pub(crate) fn new(config: &AuthConfig, client_secret: &Secret) -> Result<Self, OidcError> {
+    pub(crate) fn new(
+        config: &AuthConfig,
+        client_secret: Option<&Secret>,
+    ) -> Result<Self, OidcError> {
         let issuer = IssuerUrl::new(config.issuer_url.clone())
             .map_err(|err| OidcError::Setup(format!("auth.issuer_url: {err}")))?;
         let redirect_url = RedirectUrl::new(config.redirect_url())
@@ -139,7 +143,8 @@ impl Oidc {
         Ok(Self {
             issuer,
             client_id: ClientId::new(config.client_id.clone()),
-            client_secret: ClientSecret::new(client_secret.expose().to_owned()),
+            client_secret: client_secret
+                .map(|secret| ClientSecret::new(secret.expose().to_owned())),
             redirect_url,
             scopes,
             admin: config.admin.clone(),
@@ -188,7 +193,7 @@ impl Oidc {
         let client = OidcClient::from_provider_metadata(
             metadata,
             self.client_id.clone(),
-            Some(self.client_secret.clone()),
+            self.client_secret.clone(),
         )
         .set_redirect_uri(self.redirect_url.clone());
         let client = Arc::new(client);

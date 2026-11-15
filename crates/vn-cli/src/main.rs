@@ -37,7 +37,7 @@ enum ConfigCommand {
         /// Path to the YAML config file.
         path: PathBuf,
         /// Also require the environment variables named in the file (database URL and,
-        /// when sign-in is configured, the OIDC client secret) to be set.
+        /// when sign-in uses a confidential client, the OIDC client secret) to be set.
         #[arg(long)]
         check_env: bool,
     },

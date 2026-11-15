@@ -80,7 +80,8 @@ async fn run(args: Args) -> anyhow::Result<()> {
         Some(auth) => {
             let secret = auth.resolve_client_secret()?;
             state = state.with_auth(
-                vn_server::AuthService::new(auth, &secret).context("invalid `auth` settings")?,
+                vn_server::AuthService::new(auth, secret.as_ref())
+                    .context("invalid `auth` settings")?,
             );
             tracing::info!(
                 issuer = %auth.issuer_url,

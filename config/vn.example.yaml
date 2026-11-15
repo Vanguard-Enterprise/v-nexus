@@ -32,7 +32,8 @@ auth:
   # with PKCE.
   client_id: "000000000000000000@vanguard-nexus"
   # Name of the environment variable that holds the client secret. The secret itself
-  # never goes in this file and is never logged.
+  # never goes in this file and is never logged. Optional: leave it out for a public
+  # client, which authenticates the code exchange with PKCE alone.
   client_secret_env: VN_OIDC_CLIENT_SECRET
   # Origin browsers use to reach VN. Register <public_url>/api/v1/auth/callback as the
   # redirect URI. With the Vite dev server, use its address, for example

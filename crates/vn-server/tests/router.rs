@@ -65,7 +65,7 @@ fn app_with_auth() -> Router {
         .unwrap();
     let state = AppState::new(unreachable_pool())
         .with_health_check(FakeDatabase::Up)
-        .with_auth(AuthService::new(&auth, &secret).unwrap());
+        .with_auth(AuthService::new(&auth, secret.as_ref()).unwrap());
     router(state, None)
 }
 

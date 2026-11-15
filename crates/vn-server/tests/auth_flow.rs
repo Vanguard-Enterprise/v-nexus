@@ -172,6 +172,9 @@ struct MockInner {
     published_kid: Mutex<String>,
     /// Sign ID tokens with HS256 and the client secret instead.
     sign_with_client_secret: AtomicBool,
+    /// Register VN as a public client: the token request must carry `client_id` in the
+    /// form and no client authentication.
+    public_client: AtomicBool,
     jwks_fetches: AtomicUsize,
     grants: Mutex<HashMap<String, Grant>>,
     userinfo: Mutex<HashMap<String, Value>>,
@@ -205,6 +208,7 @@ impl MockProvider {
             signing_kid: Mutex::new("k1".into()),
             published_kid: Mutex::new("k1".into()),
             sign_with_client_secret: AtomicBool::new(false),
+            public_client: AtomicBool::new(false),
             jwks_fetches: AtomicUsize::new(0),
             grants: Mutex::default(),
             userinfo: Mutex::default(),
@@ -321,12 +325,23 @@ async fn token(
     headers: HeaderMap,
     Form(form): Form<HashMap<String, String>>,
 ) -> Response {
-    let expected_auth = format!(
-        "Basic {}",
-        STANDARD.encode(format!("{CLIENT_ID}:{CLIENT_SECRET}"))
-    );
-    if headers.get(header::AUTHORIZATION).map(|v| v.as_bytes()) != Some(expected_auth.as_bytes()) {
-        return oauth_error("invalid_client");
+    if p.0.public_client.load(Ordering::SeqCst) {
+        if headers.contains_key(header::AUTHORIZATION)
+            || form.contains_key("client_secret")
+            || form.get("client_id").map(String::as_str) != Some(CLIENT_ID)
+        {
+            return oauth_error("invalid_client");
+        }
+    } else {
+        let expected_auth = format!(
+            "Basic {}",
+            STANDARD.encode(format!("{CLIENT_ID}:{CLIENT_SECRET}"))
+        );
+        if headers.get(header::AUTHORIZATION).map(|v| v.as_bytes())
+            != Some(expected_auth.as_bytes())
+        {
+            return oauth_error("invalid_client");
+        }
     }
     if form.get("grant_type").map(String::as_str) != Some("authorization_code") {
         return oauth_error("unsupported_grant_type");
@@ -433,16 +448,35 @@ impl Harness {
     /// Starts with `admin_yaml` as the `auth.admin` mapping and `session_yaml` appended
     /// to the `auth` block.
     async fn start_with(admin_yaml: &str, session_yaml: &str) -> Option<Self> {
+        Self::start_client(admin_yaml, session_yaml, false).await
+    }
+
+    /// Starts with VN registered as a public client, without a client secret.
+    async fn start_public_client() -> Option<Self> {
+        Self::start_client(
+            &format!("{{claim: groups, values: [{ADMIN_GROUP}]}}"),
+            "",
+            true,
+        )
+        .await
+    }
+
+    async fn start_client(admin_yaml: &str, session_yaml: &str, public: bool) -> Option<Self> {
         let db = TestDb::create().await?;
         let provider = MockProvider::start().await;
+        provider.0.public_client.store(public, Ordering::SeqCst);
+        let secret_line = if public {
+            ""
+        } else {
+            "\n  client_secret_env: VN_OIDC_CLIENT_SECRET"
+        };
         let config = vn_config::Config::from_yaml(&format!(
             "version: 1
 server: {{listen: 127.0.0.1:0}}
 database: {{url_env: VN_DATABASE_URL}}
 auth:
   issuer_url: {issuer}
-  client_id: {CLIENT_ID}
-  client_secret_env: VN_OIDC_CLIENT_SECRET
+  client_id: {CLIENT_ID}{secret_line}
   public_url: {PUBLIC_ORIGIN}
   allow_insecure_http: true
   scopes: [openid, profile, email, groups]
@@ -455,8 +489,9 @@ auth:
         let secret = auth
             .resolve_client_secret_with(|_| Some(CLIENT_SECRET.into()))
             .unwrap();
-        let state =
-            AppState::new(db.pool.clone()).with_auth(AuthService::new(&auth, &secret).unwrap());
+        assert_eq!(secret.is_none(), public);
+        let state = AppState::new(db.pool.clone())
+            .with_auth(AuthService::new(&auth, secret.as_ref()).unwrap());
         let app = router(state, None);
         Some(Self { db, provider, app })
     }
@@ -650,6 +685,19 @@ async fn browser_sign_in_creates_a_hashed_server_side_session() {
         "{details}"
     );
     assert_eq!(h.audit_actions().await, ["auth.login"]);
+
+    h.finish().await;
+}
+
+#[tokio::test]
+async fn public_client_signs_in_with_pkce_and_no_secret() {
+    let h = harness!(Harness::start_public_client());
+
+    let token = h.sign_in(alice()).await;
+    let me = h.get(&token, "/api/v1/auth/me").await;
+    assert_eq!(me.status, StatusCode::OK);
+    assert_eq!(me.json["user"]["subject"], "alice");
+    assert_eq!(me.json["installation_roles"], json!(["admin"]));
 
     h.finish().await;
 }

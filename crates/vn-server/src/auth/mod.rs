@@ -39,8 +39,12 @@ pub struct AuthSetupError(#[from] OidcError);
 
 impl AuthService {
     /// Builds the service. Provider discovery happens on first use, so the server starts
-    /// even while the provider is unreachable.
-    pub fn new(config: &AuthConfig, client_secret: &Secret) -> Result<Self, AuthSetupError> {
+    /// even while the provider is unreachable. `client_secret` is `None` for a public
+    /// client.
+    pub fn new(
+        config: &AuthConfig,
+        client_secret: Option<&Secret>,
+    ) -> Result<Self, AuthSetupError> {
         Ok(Self {
             oidc: oidc::Oidc::new(config, client_secret)?,
             public_origin: config.public_origin(),

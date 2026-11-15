@@ -1,4 +1,4 @@
-//! Agent enrollment and administration API types.
+//! Agent enrollment, authentication, and administration API types.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -11,8 +11,33 @@ pub const AGENT_INFO_PATH: &str = "/api/v1/agent/info";
 /// token and a signature, not by a user session.
 pub const AGENT_ENROLL_PATH: &str = "/api/v1/agent/enroll";
 
+/// Issues a stateless session challenge (`POST`). Unauthenticated.
+pub const AGENT_CHALLENGE_PATH: &str = "/api/v1/agent/auth/challenge";
+
+/// Trades a signed challenge for a session token (`POST`).
+pub const AGENT_SESSION_PATH: &str = "/api/v1/agent/auth/session";
+
+/// Opens the agent WebSocket connection (`GET` with an upgrade), authenticated with
+/// `Authorization: Bearer <session token>`.
+pub const AGENT_CONNECT_PATH: &str = "/api/v1/agent/connect";
+
 /// Agent protocol major versions this build supports.
 pub const AGENT_PROTOCOL_VERSIONS: &[u32] = &[1];
+
+/// Prefix of every agent session token string.
+pub const AGENT_SESSION_TOKEN_PREFIX: &str = "vn_agent_session_";
+
+/// Domain separation prefix of the session signature.
+pub const SESSION_SIGNATURE_CONTEXT: &[u8] = b"vn-agent-session-v1";
+
+/// How long a challenge may be answered.
+pub const CHALLENGE_LIFETIME_SECONDS: i64 = 60;
+
+/// How long a session token may be used to open connections.
+pub const AGENT_SESSION_MINUTES: i64 = 15;
+
+/// Length of a key ID: URL-safe base64 of a SHA-256 digest, without padding.
+pub const KEY_ID_LEN: usize = 43;
 
 /// Prefix of every enrollment token string.
 pub const ENROLLMENT_TOKEN_PREFIX: &str = "vn_enroll_";
@@ -45,6 +70,33 @@ pub fn enrollment_signing_message(
     message.extend_from_slice(installation_id.as_bytes());
     message.extend_from_slice(token_id.as_bytes());
     message.extend_from_slice(public_key);
+    message
+}
+
+/// The message an agent signs with its Ed25519 key to answer a session challenge:
+///
+/// ```text
+/// "vn-agent-session-v1" 0x00 installation_id agent_id key_id challenge_id nonce
+/// ```
+///
+/// The IDs are their 16 raw UUID bytes, the key ID its [`KEY_ID_LEN`] ASCII bytes, and the
+/// nonce its 32 raw bytes, so every field has a fixed length.
+pub fn session_signing_message(
+    installation_id: Uuid,
+    agent_id: Uuid,
+    key_id: &str,
+    challenge_id: Uuid,
+    nonce: &[u8; 32],
+) -> Vec<u8> {
+    let mut message =
+        Vec::with_capacity(SESSION_SIGNATURE_CONTEXT.len() + 1 + 16 + 16 + key_id.len() + 16 + 32);
+    message.extend_from_slice(SESSION_SIGNATURE_CONTEXT);
+    message.push(0);
+    message.extend_from_slice(installation_id.as_bytes());
+    message.extend_from_slice(agent_id.as_bytes());
+    message.extend_from_slice(key_id.as_bytes());
+    message.extend_from_slice(challenge_id.as_bytes());
+    message.extend_from_slice(nonce);
     message
 }
 
@@ -176,6 +228,50 @@ pub struct EnrollResponse {
     pub key_id: String,
 }
 
+/// Body of `POST /api/v1/agent/auth/challenge`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChallengeRequest {
+    pub agent_id: Uuid,
+}
+
+/// A session challenge. The server stores nothing: the MAC lets it recognize its own
+/// challenges when they come back.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Challenge {
+    pub challenge_id: Uuid,
+    /// 32 random bytes, URL-safe base64 without padding.
+    pub nonce: String,
+    /// When the challenge stops being accepted, in whole seconds.
+    pub expires_at: DateTime<Utc>,
+    /// Server MAC over the agent ID and the fields above, URL-safe base64 without padding.
+    /// Opaque to the agent, which returns it unchanged.
+    pub mac: String,
+}
+
+/// Body of `POST /api/v1/agent/auth/session`: a challenge returned unchanged, with the
+/// agent's signature over [`session_signing_message`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionRequest {
+    pub agent_id: Uuid,
+    pub key_id: String,
+    pub challenge_id: Uuid,
+    pub nonce: String,
+    pub expires_at: DateTime<Utc>,
+    pub mac: String,
+    /// Ed25519 signature, URL-safe base64 without padding.
+    pub signature: String,
+}
+
+/// Body of a successful `POST /api/v1/agent/auth/session`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentSession {
+    /// Bearer token for [`AGENT_CONNECT_PATH`]. Secret: do not log it.
+    pub token: String,
+    pub expires_at: DateTime<Utc>,
+}
+
 /// Whether an agent may still connect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -256,6 +352,25 @@ mod tests {
         assert_eq!(&message[19..35], &[1; 16]);
         assert_eq!(&message[35..51], &[2; 16]);
         assert_eq!(&message[51..], &[3; 32]);
+    }
+
+    #[test]
+    fn session_signing_message_layout() {
+        let key_id = "k".repeat(KEY_ID_LEN);
+        let message = session_signing_message(
+            Uuid::from_bytes([1; 16]),
+            Uuid::from_bytes([2; 16]),
+            &key_id,
+            Uuid::from_bytes([3; 16]),
+            &[4; 32],
+        );
+        assert_eq!(message.len(), 19 + 1 + 16 + 16 + 43 + 16 + 32);
+        assert!(message.starts_with(b"vn-agent-session-v1\0"));
+        assert_eq!(&message[20..36], &[1; 16]);
+        assert_eq!(&message[36..52], &[2; 16]);
+        assert_eq!(&message[52..95], key_id.as_bytes());
+        assert_eq!(&message[95..111], &[3; 16]);
+        assert_eq!(&message[111..], &[4; 32]);
     }
 
     #[test]

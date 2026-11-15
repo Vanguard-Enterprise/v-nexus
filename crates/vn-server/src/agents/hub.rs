@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use sqlx::PgPool;
-use sqlx::postgres::PgListener;
+use sqlx::postgres::{PgListener, PgPoolOptions};
 use tokio::sync::{Notify, mpsc};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
@@ -184,9 +184,15 @@ pub(crate) async fn start(pool: &PgPool, hub: Arc<ConnectionHub>) -> sqlx::Resul
     delete_expired(pool).await?;
 
     // Listen before returning, so a revocation committed after startup is never missed.
-    let mut listener = PgListener::connect_with(pool).await?;
+    // The listener holds its connection for as long as the server runs, so it gets its
+    // own single-connection pool instead of permanently taking one from the application
+    // pool, which may be configured with a single connection.
+    let listener_pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect_lazy_with((*pool.connect_options()).clone());
+    let mut listener = PgListener::connect_with(&listener_pool).await?;
     listener.listen(AGENT_REVOKED_CHANNEL).await?;
-    let listen = tokio::spawn(listen_for_revocations(listener, pool.clone(), hub.clone()));
+    let listen = tokio::spawn(listen_for_revocations(listener, listener_pool, hub.clone()));
     let cleanup = tokio::spawn(clean_up(pool.clone()));
     Ok(AgentTasks {
         hub,
@@ -194,7 +200,8 @@ pub(crate) async fn start(pool: &PgPool, hub: Arc<ConnectionHub>) -> sqlx::Resul
     })
 }
 
-/// Closes the connection of every agent named in a revocation notification.
+/// Closes the connection of every agent named in a revocation notification. `pool` is the
+/// listener's own pool, used to reconnect.
 async fn listen_for_revocations(mut listener: PgListener, pool: PgPool, hub: Arc<ConnectionHub>) {
     loop {
         match listener.try_recv().await {

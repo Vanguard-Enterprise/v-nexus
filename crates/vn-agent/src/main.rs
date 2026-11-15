@@ -173,9 +173,12 @@ async fn enroll_with_retries(
              create an enrollment token in Vanguard Nexus and pass it in {ENROLLMENT_TOKEN_ENV}"
         ),
     };
+    // One key for every attempt, so a retry after a lost response is recognized as a
+    // repeat of the committed enrollment instead of a second use of the token.
+    let key = enroll::generate_key()?;
     let mut backoff = Backoff::default();
     loop {
-        match enroll::enroll(server, &token, fingerprint).await {
+        match enroll::enroll(server, &token, &key, fingerprint).await {
             Ok(identity) => {
                 store.create(&identity).await.with_context(|| {
                     format!(

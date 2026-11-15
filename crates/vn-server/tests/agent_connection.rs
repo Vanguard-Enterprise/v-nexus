@@ -1092,3 +1092,30 @@ async fn shutdown_and_startup_close_open_connections() {
     assert_eq!(row.close_code, None);
     h.finish().await;
 }
+
+#[tokio::test]
+async fn the_revocation_listener_leaves_a_single_connection_pool_usable() {
+    let Some(db) = TestDb::create().await else {
+        return;
+    };
+    let small = PgPoolOptions::new()
+        .max_connections(1)
+        .acquire_timeout(Duration::from_secs(3))
+        .connect_with((*db.pool.connect_options()).clone())
+        .await
+        .unwrap();
+    let tasks = AppState::new(small.clone())
+        .start_agent_tasks()
+        .await
+        .unwrap();
+    // The listener keeps its connection for as long as the server runs. Requests must
+    // still get the application pool's only connection.
+    let one: i32 = sqlx::query_scalar("SELECT 1")
+        .fetch_one(&small)
+        .await
+        .expect("the application pool still has a connection");
+    assert_eq!(one, 1);
+    tasks.shutdown(Duration::from_secs(1)).await;
+    small.close().await;
+    db.drop_database().await;
+}

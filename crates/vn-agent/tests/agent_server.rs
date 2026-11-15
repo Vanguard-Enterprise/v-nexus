@@ -164,9 +164,16 @@ agents: {{challenge_key_env: VN_AGENT_CHALLENGE_KEY}}
             )
             .await;
         let token = created["secret"].as_str().unwrap();
-        let identity = vn_agent::enroll::enroll(&self.client(), token, FINGERPRINT)
+        let key = vn_agent::enroll::generate_key().unwrap();
+        let identity = vn_agent::enroll::enroll(&self.client(), token, &key, FINGERPRINT)
             .await
             .unwrap();
+        // A retry with the same key, as after a lost response, gets the same identity.
+        let repeated = vn_agent::enroll::enroll(&self.client(), token, &key, FINGERPRINT)
+            .await
+            .unwrap();
+        assert_eq!(repeated.agent_id, identity.agent_id);
+        assert_eq!(repeated.key_id, identity.key_id);
         let store = IdentityStore::File(dir.path().join("identity.json"));
         store.create(&identity).await.unwrap();
         store.load().await.unwrap().unwrap()

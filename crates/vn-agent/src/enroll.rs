@@ -23,11 +23,22 @@ pub fn token_id(token: &str) -> anyhow::Result<Uuid> {
     Ok(Uuid::try_parse(id)?)
 }
 
-/// Generates a key pair and enrolls it with `token`. The returned identity is not
-/// stored yet.
+/// Generates a new signing key for one enrollment.
+pub fn generate_key() -> anyhow::Result<SigningKey> {
+    let mut seed = [0u8; 32];
+    getrandom::fill(&mut seed).context("failed to generate a key")?;
+    Ok(SigningKey::from_bytes(&seed))
+}
+
+/// Enrolls `key` with `token`. The returned identity is not stored yet.
+///
+/// Retry with the same key after a transient failure: if the server committed the
+/// enrollment but the response was lost, it answers a repeat of the same token and key
+/// with the original result, while a new key would find the token used.
 pub async fn enroll(
     server: &ServerClient,
     token: &str,
+    key: &SigningKey,
     cluster_fingerprint: &str,
 ) -> anyhow::Result<Identity> {
     let token_id = token_id(token)?;
@@ -43,9 +54,6 @@ pub async fn enroll(
             AGENT_PROTOCOL_VERSIONS
         );
     }
-    let mut seed = [0u8; 32];
-    getrandom::fill(&mut seed).context("failed to generate a key")?;
-    let key = SigningKey::from_bytes(&seed);
     let public_key = key.verifying_key().to_bytes();
     let message = enrollment_signing_message(info.installation_id, token_id, &public_key);
     let request = EnrollRequest {
@@ -59,10 +67,10 @@ pub async fn enroll(
         cluster_fingerprint: cluster_fingerprint.to_owned(),
     };
     let enrolled = server.enroll(&request).await?;
-    if enrolled.key_id != key_id(&key) || enrolled.installation_id != info.installation_id {
+    if enrolled.key_id != key_id(key) || enrolled.installation_id != info.installation_id {
         bail!("the server's enrollment response does not match the request");
     }
-    Ok(Identity::new(&enrolled, &key, server.base().as_str()))
+    Ok(Identity::new(&enrolled, key, server.base().as_str()))
 }
 
 #[cfg(test)]

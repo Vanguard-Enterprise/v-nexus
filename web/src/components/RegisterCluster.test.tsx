@@ -2,7 +2,7 @@ import { act, fireEvent, screen, waitFor, within } from "@testing-library/react"
 import { describe, expect, it, vi } from "vitest";
 import { ProjectPage } from "../pages/ProjectPage";
 import { PROJECT, TOKEN } from "../test/fixtures";
-import { VIEWER, jsonResponse, renderPage, requestsTo, sentJson, serveApi } from "../test/utils";
+import { VIEWER, jsonResponse, notFound, renderPage, requestsTo, sentJson, serveApi } from "../test/utils";
 
 const SECRET = "vn_enroll_t1_0123456789abcdef";
 
@@ -165,6 +165,25 @@ describe("Register cluster", () => {
     await act(() => client.refetchQueries({ queryKey: ["project", "prod"], exact: true }));
 
     expect(await screen.findByText(/The project could not be refreshed/)).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Install the agent on prod-east" })).toHaveTextContent(SECRET);
+  });
+
+  it("hides project controls but keeps the issued token when the project becomes unavailable", async () => {
+    let gone = false;
+    serve({ "GET /api/v1/projects/prod": () => (gone ? notFound() : jsonResponse(PROJECT)) });
+    const { client } = renderPage(<ProjectPage />, page);
+    fireEvent.click(await screen.findByRole("button", { name: "Register cluster" }));
+    fireEvent.change(screen.getByLabelText("Cluster name"), { target: { value: "prod-east" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create enrollment token" }));
+    await screen.findByRole("region", { name: "Install the agent on prod-east" });
+    expect(await screen.findByRole("region", { name: "Enrollment tokens" })).toBeInTheDocument();
+
+    gone = true;
+    await act(() => client.refetchQueries({ queryKey: ["project", "prod"], exact: true }));
+
+    expect(await screen.findByText(/This project is no longer available to you/)).toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Enrollment tokens" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Clusters" })).not.toBeInTheDocument();
     expect(screen.getByRole("region", { name: "Install the agent on prod-east" })).toHaveTextContent(SECRET);
   });
 });

@@ -9,6 +9,7 @@ import { EnrollmentTokensPanel } from "../components/EnrollmentTokensPanel";
 import { ErrorState } from "../components/ErrorState";
 import { MembersPanel } from "../components/MembersPanel";
 import { RegisterCluster } from "../components/RegisterCluster";
+import { isMissing } from "../lib/errors";
 import { accessLabel } from "../lib/labels";
 import { useDocumentTitle } from "../lib/title";
 
@@ -33,6 +34,8 @@ export function ProjectPage() {
     );
   }
 
+  // A 403 or 404 after a successful load: the project was removed or access was revoked.
+  const gone = isMissing(project.error);
   return (
     <>
       <Breadcrumbs items={[{ label: "Projects", to: "/" }, { label: project.data?.name ?? slug }]} />
@@ -45,8 +48,11 @@ export function ProjectPage() {
       </div>
       <div className="stack">
         {project.error && (
-          <p className="callout" data-tone="degraded" role="alert">
-            The project could not be refreshed. {project.error.message}
+          <p className="callout" data-tone={gone ? "down" : "degraded"} role="alert">
+            {gone
+              ? "This project is no longer available to you: it was removed, or your access changed."
+              : "The project could not be refreshed."}{" "}
+            {project.error.message}
           </p>
         )}
         {registering && canManageAgents && (
@@ -57,16 +63,20 @@ export function ProjectPage() {
             }}
           />
         )}
-        <ClustersPanel
-          slug={slug}
-          canRegister={canManageAgents}
-          registering={registering}
-          onRegister={() => {
-            setRegistering(true);
-          }}
-        />
-        {canManageAgents && <EnrollmentTokensPanel slug={slug} />}
-        <MembersPanel slug={slug} />
+        {!gone && (
+          <>
+            <ClustersPanel
+              slug={slug}
+              canRegister={canManageAgents}
+              registering={registering}
+              onRegister={() => {
+                setRegistering(true);
+              }}
+            />
+            {canManageAgents && <EnrollmentTokensPanel slug={slug} />}
+            <MembersPanel slug={slug} />
+          </>
+        )}
       </div>
     </>
   );

@@ -931,7 +931,9 @@ async fn the_connection_with_the_highest_epoch_is_current_whatever_its_open_time
     let old = h.connect(&agent, "v1.35.1").await;
     old.close().await;
     wait_disconnected(&h, &agent).await;
-    let conn = h.connect(&agent, "v1.35.2").await;
+    let mut conn = h.connect(&agent, "v1.35.2").await;
+    // The acknowledged snapshot shows the server has processed `hello` before it.
+    conn.snapshot("v1/nodes", &[node("a", "ua", "1")]).await;
 
     // Overlapping opens can record `opened_at` (the transaction start) out of epoch order.
     sqlx::query(

@@ -15,6 +15,7 @@ use tokio::sync::watch;
 use tracing_subscriber::EnvFilter;
 use vn_agent::backoff::Backoff;
 use vn_agent::client::ServerClient;
+use vn_agent::collect::KubeCollector;
 use vn_agent::identity::{Identity, IdentityStore};
 use vn_agent::runner::{self, Runner, Stop};
 use vn_agent::{cluster, enroll};
@@ -155,7 +156,10 @@ async fn run(args: RunArgs) -> anyhow::Result<Stop> {
             "VN_SERVER_URL differs from the server this agent enrolled with; using VN_SERVER_URL"
         );
     }
-    Ok(Runner::new(server, identity, cluster)?.run(stop).await)
+    Ok(Runner::new(server, identity, cluster)?
+        .with_collector(KubeCollector::new(kube))
+        .run(stop)
+        .await)
 }
 
 /// Enrolls and stores the identity, retrying while the server is unreachable or

@@ -1,17 +1,20 @@
 //! One WebSocket connection to the server, from the upgrade to the close.
 //!
-//! The connection reads `welcome`, sends `hello`, answers server pings (tungstenite does
-//! this while reading), and sends whatever is queued on its [`Outbound`] channel,
-//! numbering messages in queue order. It ends with an [`Outcome`] that tells the
-//! [`Runner`](crate::runner::Runner) what to do next, following the close code table in
-//! `docs/agent-protocol.md`.
+//! The connection reads `welcome`, sends `hello`, starts inventory collection (if the
+//! agent has a collector) with a fresh [`SyncQueue`], answers server pings (tungstenite
+//! does this while reading), and sends from the queue, numbering messages in queue
+//! order, while fewer than `ack_window` messages are unacknowledged. It ends with an
+//! [`Outcome`] that tells the [`Runner`](crate::runner::Runner) what to do next,
+//! following the close code table in `docs/agent-protocol.md`. Collection stops with
+//! the connection: unacknowledged observations are discarded, and the next connection
+//! reconciles from new snapshots.
 
+use std::collections::VecDeque;
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
-use serde_json::Value;
 use tokio::net::TcpStream;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::watch;
 use tokio::time::Instant;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode as WsCloseCode;
@@ -24,6 +27,8 @@ use vn_core::agent_protocol::{
 
 use crate::client::ServerClient;
 use crate::cluster::ClusterInfo;
+use crate::collect::{Collect, Limits};
+use crate::queue::{Outgoing, SyncQueue};
 
 /// How long the upgrade and the `welcome` may take.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -36,9 +41,6 @@ const MAX_SERVER_MESSAGE: usize = 1024 * 1024;
 
 /// How long to wait for the server to answer a close frame.
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(1);
-
-/// Messages queued for sending, at most. Senders wait when it is full.
-const QUEUE_CAPACITY: usize = 1024;
 
 type Ws = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
@@ -55,43 +57,6 @@ pub enum Outcome {
     IdentityMismatch(String),
     /// Shutdown was requested, and the connection is closed.
     Stopped,
-}
-
-/// The connection was closed before the message could be queued.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-#[error("the connection is closed")]
-pub struct ConnectionClosed;
-
-struct Queued {
-    kind: &'static str,
-    body: Value,
-}
-
-/// Queues agent messages on one connection, which numbers them (`seq`) in queue order.
-/// Collectors get a clone for each new connection. A connection's channel closes with
-/// it: after a reconnect the agent reconciles from fresh snapshots instead of resending.
-#[derive(Clone)]
-pub struct Outbound {
-    tx: mpsc::Sender<Queued>,
-}
-
-impl Outbound {
-    fn channel() -> (Self, mpsc::Receiver<Queued>) {
-        let (tx, rx) = mpsc::channel(QUEUE_CAPACITY);
-        (Self { tx }, rx)
-    }
-
-    /// Queues `body`, waiting while the queue is full.
-    pub async fn send<M: Message>(&self, body: &M) -> Result<(), ConnectionClosed> {
-        let body = serde_json::to_value(body).expect("message bodies serialize to JSON");
-        self.tx
-            .send(Queued {
-                kind: M::TYPE,
-                body,
-            })
-            .await
-            .map_err(|_| ConnectionClosed)
-    }
 }
 
 /// What to do after the server closed the connection with `code`.
@@ -137,6 +102,7 @@ pub async fn run(
     server: &ServerClient,
     token: &str,
     cluster: &ClusterInfo,
+    collector: Option<&dyn Collect>,
     shutdown: &mut watch::Receiver<bool>,
 ) -> Outcome {
     let mut request = match server.connect_url().as_str().into_client_request() {
@@ -186,6 +152,9 @@ pub async fn run(
         ws,
         next_in: 1,
         next_out: 1,
+        unacked: VecDeque::new(),
+        window: 1,
+        queue: SyncQueue::new(),
         last_traffic: Instant::now(),
     };
     if selected != Some(protocol.as_str()) {
@@ -198,7 +167,7 @@ pub async fn run(
             .await;
         return Outcome::Reconnect { healthy: false };
     }
-    connection.serve(cluster, shutdown).await
+    connection.serve(cluster, collector, shutdown).await
 }
 
 /// The outcome of an HTTP error answer to the upgrade request.
@@ -226,6 +195,13 @@ struct Connection {
     next_in: u64,
     /// `seq` of the next agent message.
     next_out: u64,
+    /// Sent inventory messages the server has not acknowledged yet, by `seq`. `hello`
+    /// and `error` are outside the window: the server does not acknowledge them.
+    unacked: VecDeque<u64>,
+    /// Most unacknowledged inventory messages, from `welcome`.
+    window: usize,
+    /// Messages waiting for room in the window.
+    queue: SyncQueue,
     last_traffic: Instant,
 }
 
@@ -244,6 +220,7 @@ impl Connection {
     async fn serve(
         &mut self,
         cluster: &ClusterInfo,
+        collector: Option<&dyn Collect>,
         shutdown: &mut watch::Receiver<bool>,
     ) -> Outcome {
         let welcome = match tokio::time::timeout(HANDSHAKE_TIMEOUT, self.read_welcome()).await {
@@ -269,22 +246,31 @@ impl Connection {
         let idle_timeout =
             Duration::from_secs(u64::from(welcome.heartbeat_interval_seconds.max(5)) * 3);
 
-        let (outbound, mut queue) = Outbound::channel();
+        self.window = usize::try_from(welcome.ack_window.max(1)).unwrap_or(usize::MAX);
         let hello = Hello {
             agent_version: crate::VERSION.to_owned(),
             capabilities: Vec::new(),
             cluster_fingerprint: cluster.fingerprint.clone(),
             kubernetes_version: cluster.kubernetes_version.clone(),
         };
-        if outbound.send(&hello).await.is_err() {
-            return self.finish(Ending::Lost, false).await;
+        if let Err(ending) = self.send(&Outgoing::new(&hello)).await {
+            return self.finish(ending, false).await;
         }
+        // Dropped when the connection ends, which stops collection.
+        let _collection = collector.map(|collector| {
+            let limits = Limits {
+                max_message_bytes: usize::try_from(welcome.max_message_bytes).unwrap_or(usize::MAX),
+            };
+            collector.start(self.queue.clone(), limits)
+        });
 
+        let queue = self.queue.clone();
         let ending = loop {
             let idle_deadline = self.last_traffic + idle_timeout;
+            let room = self.in_flight() < self.window;
             let step: Result<(), Ending> = tokio::select! {
                 frame = self.ws.next() => self.on_frame(frame).await,
-                Some(queued) = queue.recv() => self.send(queued.kind, queued.body).await,
+                () = queue.changed(), if room => self.send_queued().await,
                 () = tokio::time::sleep_until(idle_deadline) => Err(Ending::AgentCloses(
                     1000,
                     "no traffic from the server within the heartbeat timeout",
@@ -298,7 +284,6 @@ impl Connection {
                 break ending;
             }
         };
-        drop(outbound);
         let healthy = opened.elapsed() >= HEALTHY_AFTER;
         self.finish(ending, healthy).await
     }
@@ -388,7 +373,16 @@ impl Connection {
             )),
             (_, ServerMessage::Ack(ack)) => {
                 tracing::trace!(seq = ack.seq, "acknowledged");
-                Ok(())
+                if ack.seq >= self.next_out {
+                    return Err(Ending::AgentCloses(
+                        CloseCode::ProtocolError.code(),
+                        "the server acknowledged a message that was not sent",
+                    ));
+                }
+                while self.unacked.front().is_some_and(|seq| *seq <= ack.seq) {
+                    self.unacked.pop_front();
+                }
+                self.send_queued().await
             }
             (seq, ServerMessage::Error(error)) => {
                 tracing::warn!(
@@ -402,24 +396,38 @@ impl Connection {
             }
             (seq, ServerMessage::Unknown { kind }) => {
                 tracing::debug!(seq, kind, "unsupported server message type");
-                let error = ErrorMessage::unsupported_type(&kind, seq);
-                let body = serde_json::to_value(&error).expect("error bodies serialize");
-                self.send(ErrorMessage::TYPE, body).await
+                let error = Outgoing::new(&ErrorMessage::unsupported_type(&kind, seq));
+                self.queue.update(|q| q.control(error));
+                self.send_queued().await
             }
         }
     }
 
-    async fn send(&mut self, kind: &'static str, body: Value) -> Result<(), Ending> {
-        let envelope = Envelope {
-            kind: kind.to_owned(),
-            seq: self.next_out,
-            body,
-        };
-        let text = serde_json::to_string(&envelope).expect("envelopes serialize to JSON");
+    /// Inventory messages sent and not yet acknowledged.
+    fn in_flight(&self) -> usize {
+        self.unacked.len()
+    }
+
+    /// Sends queued messages while the window has room.
+    async fn send_queued(&mut self) -> Result<(), Ending> {
+        while self.in_flight() < self.window {
+            let Some(message) = self.queue.pop() else {
+                break;
+            };
+            self.send(&message).await?;
+        }
+        Ok(())
+    }
+
+    async fn send(&mut self, message: &Outgoing) -> Result<(), Ending> {
+        let text = message.frame(self.next_out);
         self.ws.send(WsMessage::text(text)).await.map_err(|err| {
             tracing::warn!(error = %err, "failed to send to the server");
             Ending::Lost
         })?;
+        if !matches!(message.kind, Hello::TYPE | ErrorMessage::TYPE) {
+            self.unacked.push_back(self.next_out);
+        }
         self.next_out += 1;
         Ok(())
     }

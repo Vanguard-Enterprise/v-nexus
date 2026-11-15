@@ -1,4 +1,7 @@
+import { parseUser } from "./auth";
+import type { User } from "./auth";
 import { apiGet } from "./client";
+import { asObject, isString, parseArray } from "./parse";
 
 export type ProjectRole = "viewer" | "operator";
 
@@ -55,4 +58,38 @@ export function parseProjectList(body: unknown): Project[] | undefined {
 
 export function fetchProjects(signal?: AbortSignal): Promise<Project[]> {
   return apiGet("/projects", { parse: parseProjectList, ...(signal ? { signal } : {}) });
+}
+
+export function fetchProject(slug: string, signal?: AbortSignal): Promise<Project> {
+  return apiGet(`/projects/${encodeURIComponent(slug)}`, {
+    parse: parseProject,
+    ...(signal ? { signal } : {}),
+  });
+}
+
+/** A user's role in a project, mirroring `ProjectMember` in the vn-core crate. */
+export interface ProjectMember {
+  user: User;
+  role: ProjectRole;
+  granted_at: string;
+}
+
+export function parseMember(value: unknown): ProjectMember | undefined {
+  const body = asObject(value);
+  if (!body) return undefined;
+  const user = parseUser(body.user);
+  const { role, granted_at } = body;
+  if (!user || !(role === "viewer" || role === "operator") || !isString(granted_at)) return undefined;
+  return { user, role, granted_at };
+}
+
+export function parseMemberList(value: unknown): ProjectMember[] | undefined {
+  return parseArray(asObject(value)?.members, parseMember);
+}
+
+export function fetchMembers(slug: string, signal?: AbortSignal): Promise<ProjectMember[]> {
+  return apiGet(`/projects/${encodeURIComponent(slug)}/members`, {
+    parse: parseMemberList,
+    ...(signal ? { signal } : {}),
+  });
 }

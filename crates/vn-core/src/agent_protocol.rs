@@ -4,9 +4,11 @@
 //! Messages are JSON text frames. Each one is an [`Envelope`] whose `type` names the
 //! message and whose `seq` counts messages per connection and direction, from 1. Bodies
 //! are typed by implementing [`Message`]. Receivers ignore unknown fields, so no body
-//! type denies them. Inventory and job messages add their own [`Message`] types and
-//! variants of [`AgentMessage`] and [`ServerMessage`].
+//! type denies them. Inventory messages ([`SnapshotStart`], [`Upsert`], [`Delete`],
+//! [`SnapshotEnd`], [`SnapshotAbort`], [`CollectionError`]) follow `hello`; job messages
+//! will add their own [`Message`] types and variants.
 
+use chrono::{DateTime, Utc};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -199,11 +201,140 @@ impl Message for Ack {
     const TYPE: &'static str = "ack";
 }
 
+/// What a snapshot lists: every object of its collection, or those in one namespace.
+/// Version 1 agents list all namespaces.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Scope {
+    /// `null` for all namespaces (and for cluster-scoped collections).
+    #[serde(default)]
+    pub namespace: Option<String>,
+}
+
+impl Scope {
+    /// Every object of the collection.
+    pub const ALL: Scope = Scope { namespace: None };
+}
+
+/// Agent to server: a snapshot of `collection` in `scope` begins. Its order key is the
+/// key deletions at [`SnapshotEnd`] are inferred against.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SnapshotStart {
+    pub snapshot_id: Uuid,
+    /// A collection name such as `v1/nodes`. A string on the wire, so a collection this
+    /// build does not know does not make the message malformed.
+    pub collection: String,
+    pub scope: Scope,
+}
+
+impl Message for SnapshotStart {
+    const TYPE: &'static str = "snapshot_start";
+}
+
+/// Agent to server: the observed state of one object. Sent for each listed object of a
+/// snapshot (with `snapshot_id`) and for each watch event that adds or changes one.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Upsert {
+    /// The snapshot this upsert belongs to, `null` for a watch event.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot_id: Option<Uuid>,
+    pub collection: String,
+    pub uid: String,
+    /// `null` for cluster-scoped objects.
+    pub namespace: Option<String>,
+    pub name: String,
+    pub resource_version: String,
+    /// When the agent observed it. Stored for display only.
+    pub observed_at: DateTime<Utc>,
+    /// The sanitized object, `null` when [`Upsert::truncated`].
+    #[serde(default)]
+    pub object: Option<Value>,
+    /// The object did not fit in `max_message_bytes`, so it was sent without its body.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
+}
+
+impl Message for Upsert {
+    const TYPE: &'static str = "upsert";
+}
+
+/// Agent to server: a watch reported an object deleted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Delete {
+    pub collection: String,
+    pub uid: String,
+    pub namespace: Option<String>,
+    pub name: String,
+    /// The last resource version the agent knew.
+    pub resource_version: String,
+    pub observed_at: DateTime<Utc>,
+}
+
+impl Message for Delete {
+    const TYPE: &'static str = "delete";
+}
+
+/// Agent to server: the snapshot listed `item_count` objects and is complete.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SnapshotEnd {
+    pub snapshot_id: Uuid,
+    pub item_count: u64,
+    /// The list's resource version, when the agent knows it. The `kube-runtime`
+    /// watcher does not expose it, so version 1 agents send `null`.
+    #[serde(default)]
+    pub resource_version: Option<String>,
+}
+
+impl Message for SnapshotEnd {
+    const TYPE: &'static str = "snapshot_end";
+}
+
+/// Agent to server: the snapshot will not complete. No deletions are inferred from it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SnapshotAbort {
+    pub snapshot_id: Uuid,
+    /// Machine-readable, such as `relisted` or `list_failed`.
+    pub reason: String,
+}
+
+impl Message for SnapshotAbort {
+    const TYPE: &'static str = "snapshot_abort";
+}
+
+/// Agent to server: listing or watching `collection` failed. The agent keeps retrying
+/// with backoff. No deletions are inferred, and earlier inventory stays.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CollectionError {
+    pub collection: String,
+    pub scope: Scope,
+    /// Machine-readable: `forbidden`, `not_found`, `list_failed`, or `watch_failed`.
+    pub reason: String,
+    /// Human-readable detail for the UI. Never contains credentials.
+    #[serde(default)]
+    pub message: Option<String>,
+}
+
+impl CollectionError {
+    pub const FORBIDDEN: &'static str = "forbidden";
+    pub const NOT_FOUND: &'static str = "not_found";
+    pub const LIST_FAILED: &'static str = "list_failed";
+    pub const WATCH_FAILED: &'static str = "watch_failed";
+}
+
+impl Message for CollectionError {
+    const TYPE: &'static str = "collection_error";
+}
+
 /// A message from an agent, typed by its envelope `type`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum AgentMessage {
     Hello(Hello),
     Error(ErrorMessage),
+    SnapshotStart(SnapshotStart),
+    Upsert(Upsert),
+    Delete(Delete),
+    SnapshotEnd(SnapshotEnd),
+    SnapshotAbort(SnapshotAbort),
+    CollectionError(CollectionError),
     /// A type this build does not know. The receiver answers
     /// [`ErrorMessage::unsupported_type`] and continues.
     Unknown {
@@ -218,6 +349,12 @@ impl AgentMessage {
         Ok(match envelope.kind.as_str() {
             Hello::TYPE => AgentMessage::Hello(body(envelope.body)?),
             ErrorMessage::TYPE => AgentMessage::Error(body(envelope.body)?),
+            SnapshotStart::TYPE => AgentMessage::SnapshotStart(body(envelope.body)?),
+            Upsert::TYPE => AgentMessage::Upsert(body(envelope.body)?),
+            Delete::TYPE => AgentMessage::Delete(body(envelope.body)?),
+            SnapshotEnd::TYPE => AgentMessage::SnapshotEnd(body(envelope.body)?),
+            SnapshotAbort::TYPE => AgentMessage::SnapshotAbort(body(envelope.body)?),
+            CollectionError::TYPE => AgentMessage::CollectionError(body(envelope.body)?),
             _ => AgentMessage::Unknown {
                 kind: envelope.kind,
             },
@@ -336,6 +473,65 @@ mod tests {
         assert!(Envelope::parse(r#"{"type":"hello","body":{}}"#).is_err());
         assert!(Envelope::parse(r#"{"type":"hello","seq":-1,"body":{}}"#).is_err());
         assert!(Envelope::parse("not json").is_err());
+    }
+
+    #[test]
+    fn inventory_messages_round_trip() {
+        let id = Uuid::from_u128(1);
+        let text = encode(
+            2,
+            &SnapshotStart {
+                snapshot_id: id,
+                collection: "v1/nodes".into(),
+                scope: Scope::ALL,
+            },
+        );
+        assert_eq!(
+            text,
+            r#"{"type":"snapshot_start","seq":2,"body":{"snapshot_id":"00000000-0000-0000-0000-000000000001","collection":"v1/nodes","scope":{"namespace":null}}}"#
+        );
+        let upsert = json!({
+            "type": "upsert",
+            "seq": 3,
+            "body": {
+                "snapshot_id": id,
+                "collection": "v1/nodes",
+                "uid": "u1",
+                "namespace": null,
+                "name": "n1",
+                "resource_version": "10",
+                "observed_at": "2026-11-15T00:00:00Z",
+                "object": {"kind": "Node"},
+            },
+        });
+        let envelope: Envelope = serde_json::from_value(upsert).unwrap();
+        let AgentMessage::Upsert(upsert) = AgentMessage::from_envelope(envelope).unwrap() else {
+            panic!("expected an upsert");
+        };
+        assert_eq!(upsert.snapshot_id, Some(id));
+        assert!(!upsert.truncated);
+        // Watch upserts leave out `snapshot_id`, and `truncated` only appears when set.
+        let watch = Upsert {
+            snapshot_id: None,
+            truncated: true,
+            object: None,
+            ..upsert
+        };
+        let json = serde_json::to_value(&watch).unwrap();
+        assert!(json.get("snapshot_id").is_none());
+        assert_eq!(json["truncated"], true);
+        let end = Envelope::parse(&format!(
+            r#"{{"type":"snapshot_end","seq":4,"body":{{"snapshot_id":"{id}","item_count":1}}}}"#
+        ))
+        .unwrap();
+        assert_eq!(
+            AgentMessage::from_envelope(end).unwrap(),
+            AgentMessage::SnapshotEnd(SnapshotEnd {
+                snapshot_id: id,
+                item_count: 1,
+                resource_version: None,
+            })
+        );
     }
 
     #[test]

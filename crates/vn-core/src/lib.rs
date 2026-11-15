@@ -3,6 +3,7 @@
 pub mod agent_protocol;
 pub mod agents;
 pub mod api;
+pub mod inventory;
 
 pub use agents::{
     AGENT_CHALLENGE_PATH, AGENT_CONNECT_PATH, AGENT_ENROLL_PATH, AGENT_INFO_PATH,

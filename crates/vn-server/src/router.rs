@@ -126,10 +126,16 @@ pub fn router(state: AppState, static_dir: Option<&Path>) -> Router {
             state.clone(),
             auth::require_session,
         ));
-    let agent_routes = Router::new().route("/info", get(agents::info)).route(
-        "/enroll",
-        post(agents::enroll).layer(DefaultBodyLimit::max(ENROLL_BODY_LIMIT)),
-    );
+    let agent_routes = Router::new()
+        .route("/info", get(agents::info))
+        .route(
+            "/manifests/kubernetes.yaml",
+            get(agents::manifest::kubernetes),
+        )
+        .route(
+            "/enroll",
+            post(agents::enroll).layer(DefaultBodyLimit::max(ENROLL_BODY_LIMIT)),
+        );
     let v1 = Router::new()
         .route("/health", get(health))
         .nest("/auth", auth_routes)

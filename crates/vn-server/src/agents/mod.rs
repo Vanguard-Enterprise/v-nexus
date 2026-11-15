@@ -5,6 +5,7 @@
 //! list a project's agents.
 
 mod enroll;
+pub(crate) mod manifest;
 mod token;
 
 use axum::Json;

@@ -65,15 +65,16 @@ configs:
       # Uncomment and fill in to enable sign-in (see config/vn.example.yaml), then
       # export VN_OIDC_CLIENT_SECRET before `docker compose up`.
       # auth:
-      #   issuer_url: https://zitadel.example.com
-      #   client_id: "000000000000000000@vanguard-nexus"
+      #   issuer_url: https://id.example.com
+      #   client_id: "<client ID from Pocket ID>"
       #   client_secret_env: VN_OIDC_CLIENT_SECRET
       #   public_url: http://<host>:8080
       #   # Only for development over a trusted network; use https otherwise.
       #   allow_insecure_http: true
+      #   scopes: [openid, profile, email, groups]
       #   admin:
-      #     claim: "urn:zitadel:iam:org:project:roles"
-      #     values: [vn-admin]
+      #     claim: groups
+      #     values: [vn-admins]
 
 volumes:
   postgres-data:

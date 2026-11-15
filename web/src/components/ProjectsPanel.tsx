@@ -1,28 +1,20 @@
 import { useQuery } from "@tanstack/react-query";
+import { Link } from "react-router";
 import { projectsQueryOptions } from "../api";
-import type { Project } from "../api";
-
-function accessLabel(project: Project): string {
-  if (project.role === "operator") return "Operator";
-  if (project.role === "viewer") return "Viewer";
-  return "Admin";
-}
+import { accessLabel, projectPath } from "../lib/labels";
+import { ErrorState } from "./ErrorState";
 
 export function ProjectsPanel({ isAdmin }: { isAdmin: boolean }) {
-  const { data, error, isPending } = useQuery(projectsQueryOptions);
+  const { data, error, isPending, refetch } = useQuery(projectsQueryOptions);
 
   return (
     <section className="panel" aria-labelledby="projects-heading" aria-busy={isPending}>
       <header className="panel__header">
-        <h2 id="projects-heading">Projects</h2>
+        <h2 id="projects-heading">Your projects</h2>
       </header>
       <div className="panel__body">
         {isPending && <p className="muted">Loading projects…</p>}
-        {error && (
-          <p role="alert">
-            Projects could not be loaded. {error.message}
-          </p>
-        )}
+        {error && <ErrorState error={error} subject="Projects" onRetry={() => void refetch()} />}
         {data?.length === 0 && (
           <p className="muted">
             {isAdmin
@@ -34,7 +26,9 @@ export function ProjectsPanel({ isAdmin }: { isAdmin: boolean }) {
           <ul className="project-list">
             {data.map((project) => (
               <li key={project.id}>
-                <span className="project-list__name">{project.name}</span>
+                <Link className="project-list__name" to={projectPath(project.slug)}>
+                  {project.name}
+                </Link>
                 <code className="project-list__slug">{project.slug}</code>
                 <span className="badge">{accessLabel(project)}</span>
               </li>

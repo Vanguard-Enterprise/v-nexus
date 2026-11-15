@@ -4,11 +4,90 @@ export { fetchMe, loginUrl, logout, parseMe, parseUser, userLabel } from "./auth
 export type { InstallationRole, Me, User } from "./auth";
 export { fetchHealth, parseHealthResponse } from "./health";
 export type { DatabaseStatus, HealthResponse, HealthStatus } from "./health";
-export { fetchProjects, parseProject, parseProjectList } from "./projects";
-export type { Project, ProjectPermissions, ProjectRole } from "./projects";
 export {
+  fetchMembers,
+  fetchProject,
+  fetchProjects,
+  parseMember,
+  parseMemberList,
+  parseProject,
+  parseProjectList,
+} from "./projects";
+export type { Project, ProjectMember, ProjectPermissions, ProjectRole } from "./projects";
+export {
+  COLLECTIONS,
+  MAX_NAMESPACE_PAGES,
+  MAX_RESOURCE_PAGE,
+  fetchCluster,
+  fetchClusters,
+  fetchResource,
+  fetchNamespaceNames,
+  fetchResources,
+  isCollection,
+  isNamespaced,
+  parseCluster,
+  parseClusterList,
+  parseResource,
+  parseResourceDetail,
+  parseResourcePage,
+  parseSummary,
+  resourceQueryString,
+} from "./clusters";
+export type {
+  AgentStatus,
+  Cluster,
+  ClusterAgent,
+  ClusterConnection,
+  ClusterInventory,
+  Collection,
+  CollectionError,
+  CollectionState,
+  CollectionStatus,
+  ConnectionState,
+  DaemonSetSummary,
+  NamespaceSummary,
+  NodeSummary,
+  ReplicatedSummary,
+  Resource,
+  ResourceDetail,
+  ResourcePage,
+  ResourceQuery,
+  ResourceState,
+  ResourceSummary,
+} from "./clusters";
+export {
+  DEFAULT_ENROLLMENT_TOKEN_MINUTES,
+  MAX_ENROLLMENT_TOKEN_MINUTES,
+  createEnrollmentToken,
+  fetchEnrollmentTokens,
+  installCommands,
+  parseCreatedEnrollmentToken,
+  parseEnrollmentToken,
+  parseEnrollmentTokenList,
+  revokeEnrollmentToken,
+} from "./enrollment";
+export type {
+  CreateEnrollmentTokenInput,
+  CreatedEnrollmentToken,
+  EnrollmentTarget,
+  EnrollmentToken,
+  EnrollmentTokenStatus,
+} from "./enrollment";
+export { fetchAgents, parseAgent, parseAgentList, revokeAgent } from "./agents";
+export type { Agent, AgentRevocationReason } from "./agents";
+export {
+  CLUSTER_REFETCH_INTERVAL_MS,
   HEALTH_REFETCH_INTERVAL_MS,
+  agentsQueryOptions,
+  clusterQueryOptions,
+  clustersQueryOptions,
+  enrollmentTokensQueryOptions,
   healthQueryOptions,
   meQueryOptions,
+  membersQueryOptions,
+  namespaceNamesQueryOptions,
+  projectQueryOptions,
   projectsQueryOptions,
+  resourceQueryOptions,
+  resourcesQueryOptions,
 } from "./queries";

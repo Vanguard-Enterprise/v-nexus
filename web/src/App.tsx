@@ -1,23 +1,55 @@
 import { useQuery } from "@tanstack/react-query";
+import { useEffect, useRef } from "react";
+import type { ReactNode } from "react";
+import { BrowserRouter, Link, useLocation } from "react-router";
 import { API_BASE, isUnauthorized, meQueryOptions } from "./api";
+import { MeContext } from "./auth/me";
 import { HealthPanel } from "./components/HealthPanel";
-import { ProjectsPanel } from "./components/ProjectsPanel";
 import { SignInPanel } from "./components/SignInPanel";
 import { UserMenu } from "./components/UserMenu";
+import { AppRoutes } from "./routes";
 
 export function App() {
+  return (
+    <BrowserRouter>
+      <Shell />
+    </BrowserRouter>
+  );
+}
+
+function Shell() {
   const me = useQuery(meQueryOptions);
+  const location = useLocation();
+  const main = useRef<HTMLElement>(null);
+  const firstPath = useRef(location.pathname);
+
+  // After client-side navigation, move focus to the new page so screen readers announce it.
+  useEffect(() => {
+    if (location.pathname === firstPath.current) return;
+    firstPath.current = location.pathname;
+    main.current?.focus();
+  }, [location.pathname]);
 
   let content;
   if (me.data) {
-    content = <ProjectsPanel isAdmin={me.data.installation_roles.includes("admin")} />;
+    content = (
+      <MeContext value={me.data}>
+        <AppRoutes />
+      </MeContext>
+    );
   } else if (isUnauthorized(me.error)) {
-    content = <SignInPanel error={me.error} search={window.location.search} />;
+    content = (
+      <SignedOut>
+        <SignInPanel error={me.error} location={location} />
+      </SignedOut>
+    );
   } else if (me.error) {
     content = (
-      <p className="notice" role="alert">
-        Your session could not be checked. {me.error.message}
-      </p>
+      <SignedOut>
+        <p className="notice" role="alert">
+          Your session could not be checked. {me.error.message}
+        </p>
+      </SignedOut>
     );
   } else {
     content = <p className="muted">Checking your session…</p>;
@@ -30,10 +62,10 @@ export function App() {
       </a>
       <header className="topbar">
         <div className="topbar__inner">
-          <a className="brand" href="/">
+          <Link className="brand" to="/">
             <img className="brand__mark" src="/favicon.svg" alt="" width="28" height="28" />
             <span className="brand__name">Vanguard Nexus</span>
-          </a>
+          </Link>
           {me.data ? (
             <UserMenu me={me.data} />
           ) : (
@@ -44,16 +76,24 @@ export function App() {
         </div>
       </header>
 
-      <main id="main" className="main" tabIndex={-1}>
-        <div className="main__intro">
-          <h1>Overview</h1>
-          <p>Your projects and the status of this Vanguard Nexus server.</p>
-        </div>
-        <div className="stack">
-          {content}
-          <HealthPanel />
-        </div>
+      <main id="main" className="main" tabIndex={-1} ref={main}>
+        {content}
       </main>
     </div>
+  );
+}
+
+function SignedOut({ children }: { children: ReactNode }) {
+  return (
+    <>
+      <div className="page-head">
+        <h1>Vanguard Nexus</h1>
+        <p className="page-head__lede">Sign in to see your projects and clusters.</p>
+      </div>
+      <div className="stack">
+        {children}
+        <HealthPanel />
+      </div>
+    </>
   );
 }

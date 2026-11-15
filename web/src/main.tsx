@@ -2,8 +2,8 @@ import { MutationCache, QueryCache, QueryClient, QueryClientProvider } from "@ta
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { App } from "./App";
-import { isUnauthorized } from "./api";
 import { handleUnauthorized } from "./auth/session";
+import { isRetryable } from "./lib/errors";
 import "./styles.css";
 
 const queryClient = new QueryClient({
@@ -21,8 +21,8 @@ const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
       staleTime: 5_000,
-      // Retrying will not make a missing session appear.
-      retry: (failureCount, error) => !isUnauthorized(error) && failureCount < 1,
+      // Retrying will not make a missing session, project, or permission appear.
+      retry: (failureCount, error) => isRetryable(error) && failureCount < 1,
     },
   },
 });

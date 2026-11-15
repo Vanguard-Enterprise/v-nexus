@@ -554,6 +554,15 @@ impl Connection {
             ));
         }
         let mut tx = ctx.db.begin().await?;
+        // The agent record shows the version the agent runs now. Its row is written before
+        // the connection row, the same lock order as `open`, which locks the agent and
+        // then closes its other connections; the opposite order could deadlock with a
+        // replacement connection opening at the same time.
+        sqlx::query("UPDATE agents SET agent_version = $2 WHERE id = $1 AND agent_version <> $2")
+            .bind(ctx.agent_id)
+            .bind(&hello.agent_version)
+            .execute(&mut *tx)
+            .await?;
         sqlx::query(
             "UPDATE agent_connections \
              SET agent_version = $2, kubernetes_version = $3, last_seen_at = $4 WHERE id = $1",
@@ -564,12 +573,6 @@ impl Connection {
         .bind(self.last_traffic_at)
         .execute(&mut *tx)
         .await?;
-        // The agent record shows the version the agent runs now.
-        sqlx::query("UPDATE agents SET agent_version = $2 WHERE id = $1 AND agent_version <> $2")
-            .bind(ctx.agent_id)
-            .bind(&hello.agent_version)
-            .execute(&mut *tx)
-            .await?;
         tx.commit().await?;
         ctx.kubernetes_version = hello.kubernetes_version;
         tracing::info!(

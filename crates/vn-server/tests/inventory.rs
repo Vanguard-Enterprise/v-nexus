@@ -924,6 +924,33 @@ async fn reconnect_reconciles_without_false_deletions_or_duplicates() {
     h.finish().await;
 }
 
+#[tokio::test]
+async fn the_connection_with_the_highest_epoch_is_current_whatever_its_open_time() {
+    let h = harness!();
+    let agent = h.enroll("prod", "east").await;
+    let old = h.connect(&agent, "v1.35.1").await;
+    old.close().await;
+    wait_disconnected(&h, &agent).await;
+    let conn = h.connect(&agent, "v1.35.2").await;
+
+    // Overlapping opens can record `opened_at` (the transaction start) out of epoch order.
+    sqlx::query(
+        "UPDATE agent_connections SET opened_at = opened_at - interval '1 hour' \
+         WHERE source_id = $1 AND closed_at IS NULL",
+    )
+    .bind(agent.source_id)
+    .execute(&h.pool)
+    .await
+    .unwrap();
+
+    let cluster = h.cluster(agent.cluster_id).await;
+    assert_eq!(cluster["connection"]["state"], "connected");
+    assert_eq!(cluster["connection"]["kubernetes_version"], "v1.35.2");
+    assert_eq!(cluster["inventory"]["stale"], false);
+    conn.close().await;
+    h.finish().await;
+}
+
 // ---------------------------------------------------------------------------
 // Ordering
 // ---------------------------------------------------------------------------

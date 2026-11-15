@@ -76,7 +76,9 @@ async fn load_clusters(
     cluster_id: Option<Uuid>,
 ) -> Result<Vec<Cluster>, ApiFailure> {
     // A cluster's source is its whole-cluster source; its agent is the active one, or the
-    // most recent when all are revoked; its connection is the most recent one.
+    // most recent when all are revoked; its connection is the most recent one. "Most recent"
+    // means the highest sync epoch, which is allocated under the source row lock. `opened_at`
+    // is the transaction start time, so overlapping opens can record it out of order.
     let rows: Vec<ClusterRow> = sqlx::query_as(
         "SELECT c.id, c.project_id, c.display_name, c.created_at, s.id AS source_id, \
                 ag.id AS agent_id, ag.revoked_at IS NULL AS agent_active, ag.agent_version, \
@@ -95,7 +97,7 @@ async fn load_clusters(
              SELECT k.sync_epoch, k.opened_at, k.last_seen_at, k.closed_at, \
                     k.kubernetes_version \
              FROM agent_connections k WHERE k.source_id = s.id \
-             ORDER BY k.opened_at DESC, k.sync_epoch DESC LIMIT 1 \
+             ORDER BY k.sync_epoch DESC LIMIT 1 \
          ) conn ON true \
          WHERE c.project_id = $1 AND ($2::uuid IS NULL OR c.id = $2) \
          ORDER BY c.display_name, c.id",

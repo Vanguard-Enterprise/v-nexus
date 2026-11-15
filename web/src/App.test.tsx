@@ -1,4 +1,4 @@
-import { fireEvent, screen, waitFor } from "@testing-library/react";
+import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { App } from "./App";
 import { navigation } from "./auth/session";
@@ -58,6 +58,41 @@ describe("App", () => {
     expect(screen.getByText("Admin")).toBeInTheDocument();
     expect(await screen.findByText("Production")).toBeInTheDocument();
     expect(screen.getByText("Viewer")).toBeInTheDocument();
+  });
+
+  it("opens a deep link to a project and links back to the project list", async () => {
+    window.history.replaceState(null, "", "/projects/prod");
+    serve({
+      "GET /api/v1/auth/me": () => jsonResponse(ME),
+      "GET /api/v1/projects/prod": () => jsonResponse(PROJECTS.projects[0]),
+      "GET /api/v1/projects/prod/clusters": () => jsonResponse({ clusters: [] }),
+      "GET /api/v1/projects/prod/members": () => jsonResponse({ members: [] }),
+      "GET /api/v1/projects/prod/enrollment-tokens": () => jsonResponse({ tokens: [] }),
+    });
+    renderWithQuery(<App />);
+
+    expect(await screen.findByRole("heading", { level: 1, name: "Production" })).toBeInTheDocument();
+    expect(await screen.findByText("No clusters yet")).toBeInTheDocument();
+    const crumbs = screen.getByRole("navigation", { name: "Breadcrumb" });
+    expect(within(crumbs).getByRole("link", { name: "Projects" })).toHaveAttribute("href", "/");
+    window.history.replaceState(null, "", "/");
+  });
+
+  it("returns to the requested page after sign-in", async () => {
+    window.history.replaceState(null, "", "/projects/prod/clusters/c1?collection=v1%2Fnodes");
+    serve({
+      "GET /api/v1/auth/me": unauthorized,
+      "GET /api/v1/health": () => jsonResponse(HEALTH),
+    });
+    vi.spyOn(navigation, "assign").mockImplementation(() => undefined);
+    renderWithQuery(<App />);
+
+    const link = await screen.findByRole("link", { name: "Sign in" });
+    expect(link).toHaveAttribute(
+      "href",
+      "/api/v1/auth/login?return_to=%2Fprojects%2Fprod%2Fclusters%2Fc1%3Fcollection%3Dv1%252Fnodes",
+    );
+    window.history.replaceState(null, "", "/");
   });
 
   it("signs out through the API and lands on the signed-out page", async () => {

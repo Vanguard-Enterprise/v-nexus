@@ -1,6 +1,6 @@
 import { loginUrl } from "../api";
 import type { ApiError } from "../api";
-import { LOGIN_ERROR_PARAM, SIGNED_OUT_PARAM } from "../auth/session";
+import { LOGIN_ERROR_PARAM, SIGNED_OUT_PARAM, returnPath } from "../auth/session";
 
 const FAILED_MESSAGE =
   "Sign-in failed. Try again, and contact an administrator if it keeps failing.";
@@ -12,8 +12,13 @@ const LOGIN_ERRORS = new Map<string, string>([
   ["failed", FAILED_MESSAGE],
 ]);
 
-export function SignInPanel({ error, search }: { error: ApiError; search: string }) {
-  const params = new URLSearchParams(search);
+interface PageLocation {
+  pathname: string;
+  search: string;
+}
+
+export function SignInPanel({ error, location }: { error: ApiError; location: PageLocation }) {
+  const params = new URLSearchParams(location.search);
   const loginError = params.get(LOGIN_ERROR_PARAM);
   const notConfigured = error.code === "auth_not_configured";
 
@@ -36,7 +41,7 @@ export function SignInPanel({ error, search }: { error: ApiError; search: string
       <div className="panel__body">
         <p role={loginError !== null ? "alert" : undefined}>{detail}</p>
         {!notConfigured && (
-          <a className="button button--primary" href={loginUrl("/")}>
+          <a className="button button--primary" href={loginUrl(returnPath(location))}>
             Sign in
           </a>
         )}

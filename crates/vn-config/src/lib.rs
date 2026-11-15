@@ -3,13 +3,15 @@
 //! The file is YAML with an explicit schema `version`. Unknown fields are rejected so that
 //! typos fail loudly instead of being ignored. Secrets are never stored in the file: the
 //! database connection URL is read from the environment variable named by
-//! `database.url_env`, and the OIDC client secret, for confidential clients, from the one
-//! named by `auth.client_secret_env`.
+//! `database.url_env`, the OIDC client secret (for confidential clients) from the one
+//! named by `auth.client_secret_env`, and the agent challenge key from the one named by
+//! `agents.challenge_key_env`.
 
 use std::fmt;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
+use base64::Engine;
 use serde::Deserialize;
 
 /// Schema version understood by this build.
@@ -24,6 +26,10 @@ pub const DEFAULT_CONFIG_PATH: &str = "vn.yaml";
 const DEFAULT_MAX_CONNECTIONS: u32 = 10;
 const DEFAULT_IDLE_TIMEOUT_MINUTES: u32 = 60;
 const DEFAULT_ABSOLUTE_TIMEOUT_MINUTES: u32 = 12 * 60;
+/// Shortest accepted agent challenge key, in bytes.
+pub const MIN_CHALLENGE_KEY_BYTES: usize = 32;
+/// Longest accepted agent challenge key, in bytes.
+pub const MAX_CHALLENGE_KEY_BYTES: usize = 64;
 /// Upper bound on `auth.session.absolute_timeout_minutes` (30 days).
 pub const MAX_ABSOLUTE_TIMEOUT_MINUTES: u32 = 30 * 24 * 60;
 
@@ -79,6 +85,21 @@ pub struct Config {
     /// answers 401.
     #[serde(default)]
     pub auth: Option<AuthConfig>,
+    /// Agent connections. When omitted, agents can still enroll, but the challenge,
+    /// session, and connect endpoints answer 503.
+    #[serde(default)]
+    pub agents: Option<AgentsConfig>,
+}
+
+/// Agent connection settings.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentsConfig {
+    /// Name of the environment variable holding the challenge key: base64 of 32 to 64
+    /// random bytes. The server keys the MAC of its stateless session challenges with
+    /// it, so every server replica needs the same key. Changing it invalidates only
+    /// challenges that are still outstanding.
+    pub challenge_key_env: String,
 }
 
 /// HTTP server settings.
@@ -248,6 +269,9 @@ pub enum ConfigError {
     /// credentials.
     #[error("database URL in environment variable `{var}` is invalid: {message}")]
     DatabaseUrlInvalid { var: String, message: String },
+    /// The message never includes the key.
+    #[error("challenge key in environment variable `{var}` is invalid: {message}")]
+    ChallengeKeyInvalid { var: String, message: String },
 }
 
 impl Config {
@@ -303,7 +327,93 @@ impl Config {
         if let Some(auth) = &self.auth {
             auth.validate()?;
         }
+        if let Some(agents) = &self.agents
+            && !is_env_var_name(&agents.challenge_key_env)
+        {
+            return Err(ConfigError::Invalid {
+                field: "agents.challenge_key_env",
+                message: format!(
+                    "`{}` is not a valid environment variable name \
+                     (use letters, digits, and underscores, not starting with a digit)",
+                    agents.challenge_key_env
+                ),
+            });
+        }
         Ok(())
+    }
+}
+
+impl AgentsConfig {
+    /// Reads the challenge key from the process environment.
+    pub fn resolve_challenge_key(&self) -> Result<ChallengeKey, ConfigError> {
+        self.resolve_challenge_key_with(|name| {
+            std::env::var_os(name).map(|v| v.to_string_lossy().into())
+        })
+    }
+
+    /// Resolves the challenge key using `lookup` in place of the process environment.
+    ///
+    /// The value is standard base64, with or without padding, of
+    /// [`MIN_CHALLENGE_KEY_BYTES`] to [`MAX_CHALLENGE_KEY_BYTES`] bytes, as printed by
+    /// `openssl rand -base64 32`. Surrounding whitespace is ignored.
+    pub fn resolve_challenge_key_with(
+        &self,
+        lookup: impl FnOnce(&str) -> Option<String>,
+    ) -> Result<ChallengeKey, ConfigError> {
+        let field = "agents.challenge_key_env";
+        let var = &self.challenge_key_env;
+        let value = match lookup(var) {
+            None => {
+                return Err(ConfigError::EnvVarMissing {
+                    field,
+                    var: var.clone(),
+                });
+            }
+            Some(value) if value.trim().is_empty() => {
+                return Err(ConfigError::EnvVarEmpty {
+                    field,
+                    var: var.clone(),
+                });
+            }
+            Some(value) => value,
+        };
+        let invalid = |message: String| ConfigError::ChallengeKeyInvalid {
+            var: var.clone(),
+            message,
+        };
+        let engine = base64::engine::GeneralPurpose::new(
+            &base64::alphabet::STANDARD,
+            base64::engine::GeneralPurposeConfig::new()
+                .with_decode_padding_mode(base64::engine::DecodePaddingMode::Indifferent),
+        );
+        let key = engine.decode(value.trim()).map_err(|_| {
+            invalid("not valid base64 (generate one with `openssl rand -base64 32`)".into())
+        })?;
+        if !(MIN_CHALLENGE_KEY_BYTES..=MAX_CHALLENGE_KEY_BYTES).contains(&key.len()) {
+            return Err(invalid(format!(
+                "decodes to {} bytes; it must be {MIN_CHALLENGE_KEY_BYTES} to \
+                 {MAX_CHALLENGE_KEY_BYTES} bytes",
+                key.len()
+            )));
+        }
+        Ok(ChallengeKey(key))
+    }
+}
+
+/// The agent challenge key. `Debug` redacts it.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ChallengeKey(Vec<u8>);
+
+impl ChallengeKey {
+    /// Returns the key bytes. Do not log them.
+    pub fn expose(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl fmt::Debug for ChallengeKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("ChallengeKey(<redacted>)")
     }
 }
 
@@ -1134,6 +1244,72 @@ auth:
             .resolve_client_secret_with(|name| panic!("looked up {name}"))
             .unwrap();
         assert!(secret.is_none());
+    }
+
+    #[test]
+    fn agents_section_is_optional() {
+        assert_eq!(Config::from_yaml(VALID).unwrap().agents, None);
+        let config =
+            Config::from_yaml(&format!("{VALID}agents:\n  challenge_key_env: VN_KEY\n")).unwrap();
+        assert_eq!(config.agents.unwrap().challenge_key_env, "VN_KEY");
+        let message = err(&format!("{VALID}agents:\n  challenge_key_env: 1KEY\n"));
+        assert!(message.contains("`agents.challenge_key_env`"), "{message}");
+        let message = err(&format!(
+            "{VALID}agents:\n  challenge_key_env: K\n  challenge_key: x\n"
+        ));
+        assert!(
+            message.contains("unknown field `challenge_key`"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn resolves_challenge_key_without_revealing_it() {
+        let agents = AgentsConfig {
+            challenge_key_env: "VN_AGENT_CHALLENGE_KEY".into(),
+        };
+        let encoded = "c2VjcmV0LWtleS1ieXRlcy1mb3ItdGhlLWNoYWxsZW5nZS1tYWM=";
+        let key = agents
+            .resolve_challenge_key_with(|name| {
+                assert_eq!(name, "VN_AGENT_CHALLENGE_KEY");
+                Some(format!(" {encoded}\n"))
+            })
+            .unwrap();
+        assert_eq!(key.expose(), b"secret-key-bytes-for-the-challenge-mac");
+        assert!(!format!("{key:?}").contains("secret"));
+        // Padding is optional.
+        let unpadded = encoded.trim_end_matches('=');
+        assert_eq!(
+            agents
+                .resolve_challenge_key_with(|_| Some(unpadded.into()))
+                .unwrap(),
+            key
+        );
+
+        for (value, needle) in [
+            ("not base64!", "not valid base64"),
+            ("c2hvcnQ=", "decodes to 5 bytes"),
+            (&"QUFB".repeat(30), "decodes to 90 bytes"),
+        ] {
+            let message = agents
+                .resolve_challenge_key_with(|_| Some(value.into()))
+                .unwrap_err()
+                .to_string();
+            assert!(message.contains(needle), "{message}");
+            assert!(message.contains("VN_AGENT_CHALLENGE_KEY"), "{message}");
+            assert!(!message.contains(value), "{message}");
+        }
+        assert!(matches!(
+            agents.resolve_challenge_key_with(|_| None),
+            Err(ConfigError::EnvVarMissing {
+                field: "agents.challenge_key_env",
+                ..
+            })
+        ));
+        assert!(matches!(
+            agents.resolve_challenge_key_with(|_| Some("  ".into())),
+            Err(ConfigError::EnvVarEmpty { .. })
+        ));
     }
 
     #[test]

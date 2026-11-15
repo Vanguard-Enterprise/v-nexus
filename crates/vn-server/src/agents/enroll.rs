@@ -27,7 +27,7 @@ use vn_core::{
     enrollment_signing_message,
 };
 
-use super::{installation_id, notify_revoked, token};
+use super::{installation_id, revoke_access, token};
 use crate::audit::AuditEvent;
 use crate::client_addr::ClientAddr;
 use crate::error::{ApiFailure, ApiJson};
@@ -313,6 +313,18 @@ async fn enroll_agent(
     .fetch_optional(&mut *tx)
     .await?;
     let Some(consumed) = consumed else {
+        // A retry after an ambiguous failure, such as a lost response: the token was used
+        // to enroll this same key, which the caller has just proven it holds. Repeating
+        // the result hands out nothing the caller lacks, and lets an agent that never saw
+        // the response finish enrolling instead of being stranded.
+        if let Some(previous) = repeated_enrollment(&mut tx, &token, &public_key, &request).await? {
+            tx.rollback().await?;
+            tracing::info!(agent_id = %previous.agent_id, "repeated agent enrollment answered");
+            return Ok(EnrollResponse {
+                installation_id,
+                ..previous
+            });
+        }
         let refusal = explain_unusable_token(&mut tx, token.id, &token.secret_hash()).await;
         tx.rollback().await?;
         return Err(refusal);
@@ -460,7 +472,7 @@ async fn enroll_agent(
             }))
             .record(&mut tx)
             .await?;
-        notify_revoked(&mut tx, previous).await?;
+        revoke_access(&mut tx, previous).await?;
     }
     AuditEvent::system("agent.enroll")
         .project(project_id)
@@ -488,6 +500,39 @@ async fn enroll_agent(
         source_id,
         key_id,
     })
+}
+
+/// The enrollment that `token` already completed for `public_key`, if the agent it created
+/// is still active and the request matches it. `installation_id` in the result is a
+/// placeholder for the caller to fill in.
+async fn repeated_enrollment(
+    conn: &mut PgConnection,
+    token: &token::ParsedToken<'_>,
+    public_key: &[u8; 32],
+    request: &EnrollRequest,
+) -> sqlx::Result<Option<EnrollResponse>> {
+    let row: Option<(Uuid, Uuid, Uuid, String)> = sqlx::query_as(
+        "SELECT a.id, a.cluster_id, a.source_id, a.key_id FROM agents a \
+         JOIN enrollment_tokens t ON t.id = a.enrollment_token_id \
+         WHERE t.id = $1 AND t.secret_hash = $2 AND a.public_key = $3 \
+           AND a.kind = $4 AND a.cluster_fingerprint = $5 AND a.revoked_at IS NULL",
+    )
+    .bind(token.id)
+    .bind(token.secret_hash())
+    .bind(public_key.as_slice())
+    .bind(request.kind.as_str())
+    .bind(&request.cluster_fingerprint)
+    .fetch_optional(conn)
+    .await?;
+    Ok(
+        row.map(|(agent_id, cluster_id, source_id, key_id)| EnrollResponse {
+            agent_id,
+            installation_id: Uuid::nil(),
+            cluster_id,
+            source_id,
+            key_id,
+        }),
+    )
 }
 
 fn key_reused() -> ApiFailure {
@@ -546,7 +591,7 @@ fn decode_fixed<const N: usize>(value: &str) -> Option<[u8; N]> {
     URL_SAFE_NO_PAD.decode(value).ok()?.try_into().ok()
 }
 
-fn is_printable(value: &str, max_len: usize) -> bool {
+pub(super) fn is_printable(value: &str, max_len: usize) -> bool {
     (1..=max_len).contains(&value.len()) && value.bytes().all(|b| b.is_ascii_graphic())
 }
 

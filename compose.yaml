@@ -35,6 +35,8 @@ services:
       VN_DATABASE_URL: postgres://vn:vn@postgres:5432/vn
       # Only needed once the config below has an `auth` section.
       VN_OIDC_CLIENT_SECRET: ${VN_OIDC_CLIENT_SECRET:-}
+      # Only needed once the config below has an `agents` section.
+      VN_AGENT_CHALLENGE_KEY: ${VN_AGENT_CHALLENGE_KEY:-}
       RUST_LOG: ${RUST_LOG:-info}
     configs:
       - source: vn-config
@@ -75,6 +77,10 @@ configs:
       #   admin:
       #     claim: groups
       #     values: [vn-admins]
+      # Uncomment to let agents connect, then export a key before `docker compose up`:
+      #   export VN_AGENT_CHALLENGE_KEY=$(openssl rand -base64 32)
+      # agents:
+      #   challenge_key_env: VN_AGENT_CHALLENGE_KEY
 
 volumes:
   postgres-data:

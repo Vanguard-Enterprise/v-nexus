@@ -116,7 +116,7 @@ List a project's tokens with `GET /api/v1/projects/prod/enrollment-tokens`, and 
 
 The agent sends the token, its Ed25519 public key, and a signature proving it holds the private key, to `POST /api/v1/agent/enroll`. The endpoint needs no session and no `Origin` header. The signed message is the ASCII string `vn-agent-enroll-v1`, a zero byte, the 16 raw bytes of the installation ID, the 16 raw bytes of the token ID, and the 32 raw bytes of the public key. Keys and signatures are URL-safe base64 without padding. The agent reads the installation ID from `GET /api/v1/agent/info`.
 
-Until `vn-agent` exists, `curl` and `openssl` can play the agent:
+`vn-agent` does this itself (see [Run the agent](#run-the-agent)). To enroll by hand, `curl` and `openssl` can play the agent:
 
 ```sh
 SERVER=http://127.0.0.1:8080
@@ -156,7 +156,44 @@ const { agents } = await (await fetch("/api/v1/projects/prod/agents")).json();
 await send("POST", `/projects/prod/agents/${agents[0].id}/revoke`);
 ```
 
-Revocation marks the agent revoked, records an audit event, and sends a PostgreSQL notification on the `vn_agent_revoked` channel in one transaction. The cluster, its source, and its inventory stay. To bring the cluster back, create a `replace_source` token for its source and enroll a new agent.
+Revocation marks the agent revoked, deletes its sessions, records an audit event, and sends a PostgreSQL notification on the `vn_agent_revoked` channel in one transaction. The server closes the agent's open connection with code 4003 when the notification arrives, and each connection also rechecks its agent every 30 seconds in case a notification is missed. The cluster, its source, and its inventory stay. To bring the cluster back, create a `replace_source` token for its source and enroll a new agent.
+
+## Connect an agent
+
+Agents authenticate by signing a server challenge and then hold one WebSocket connection (see [Agent protocol](agent-protocol.md)). The server needs a challenge key for this. Add an `agents` section to the config file, as in `config/vn.example.yaml`:
+
+```yaml
+agents:
+  challenge_key_env: VN_AGENT_CHALLENGE_KEY
+```
+
+and export a key: base64 of 32 to 64 random bytes. The server refuses to start with a missing or malformed key, and never logs it. Without the `agents` section agents can still enroll, but the challenge, session, and connect endpoints answer `503 agents_disabled`.
+
+```sh
+export VN_AGENT_CHALLENGE_KEY=$(openssl rand -base64 32)
+```
+
+Keep the key stable across restarts: changing it only invalidates challenges issued in the last minute, but every server replica needs the same key.
+
+### Run the agent
+
+`vn-agent` reads `VN_SERVER_URL` and, the first time, `VN_ENROLLMENT_TOKEN`. In a cluster it runs with `POD_NAMESPACE` set (downward API) and stores its identity in the Secret `vn-agent-identity` in that namespace. On a development host it uses the Kubernetes client from your kubeconfig (`KUBECONFIG` or `~/.kube/config`) and an identity file instead:
+
+```sh
+export VN_SERVER_URL=http://127.0.0.1:8080
+export VN_ENROLLMENT_TOKEN='<the vn_enroll_ token string>'
+cargo run -p vn-agent -- --identity-file vn-agent-identity.json
+```
+
+The agent reads the `kube-system` namespace UID as its cluster fingerprint and the API server version from `/version`, so the kubeconfig user needs `get` on namespaces. It enrolls when no identity is stored and writes the identity file with mode 0600 (it never overwrites an existing one), then connects and reconnects with backoff from 1 to 60 seconds. Later starts reuse the stored identity and ignore `VN_ENROLLMENT_TOKEN`. The identity file holds the agent's private key: keep it out of the repository.
+
+Open connections are recorded in the `agent_connections` table:
+
+```sh
+psql "$VN_DATABASE_URL" -c 'SELECT agent_id, sync_epoch, opened_at, last_seen_at, closed_at, close_code, kubernetes_version FROM agent_connections ORDER BY opened_at DESC LIMIT 5'
+```
+
+When the agent is revoked (close code 4003) or reports a different cluster fingerprint (4010), it logs that it needs to be enrolled again and exits with status 2. Delete the identity file (or Secret) and start it with a new enrollment token. A second agent process with the same identity supersedes the first (4009), and the two keep replacing each other's connection, so run one per identity.
 
 ## Run the server
 
@@ -251,7 +288,7 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
 ```
 
-The Rust build and unit tests do not need a running database. The sign-in and access-control integration tests in `crates/vn-server/tests/auth_flow.rs` run against a mock OIDC provider and a real PostgreSQL, and the enrollment tests in `crates/vn-server/tests/agent_enrollment.rs` against a real PostgreSQL. Both are skipped (with a printed note) unless `DATABASE_URL` is set. Each test creates and drops its own database, so the user needs permission to create databases. With the Compose database:
+The Rust build and unit tests do not need a running database. The sign-in and access-control integration tests in `crates/vn-server/tests/auth_flow.rs` run against a mock OIDC provider and a real PostgreSQL, the enrollment and connection tests in `crates/vn-server/tests/agent_enrollment.rs` and `agent_connection.rs`, and the agent's end-to-end tests in `crates/vn-agent/tests/agent_server.rs`, against a real PostgreSQL. They are skipped (with a printed note) unless `DATABASE_URL` is set. Each test creates and drops its own database, so the user needs permission to create databases. With the Compose database:
 
 ```sh
 DATABASE_URL=postgres://vn:vn@localhost:5432/vn cargo test --workspace --locked
@@ -286,4 +323,4 @@ To run the server container next to the Compose database:
 docker compose --profile app up -d --build
 ```
 
-To enable sign-in there, uncomment and fill in the `auth` block in the `vn-config` config in `compose.yaml` and export `VN_OIDC_CLIENT_SECRET` first. The `server` service waits for PostgreSQL to report healthy, connects to it over the Compose network, and publishes port 8080. Stop everything with `docker compose --profile app down`.
+To enable sign-in there, uncomment and fill in the `auth` block in the `vn-config` config in `compose.yaml` and export `VN_OIDC_CLIENT_SECRET` first. To let agents connect, uncomment the `agents` block and export `VN_AGENT_CHALLENGE_KEY` (see [Connect an agent](#connect-an-agent)). The `server` service waits for PostgreSQL to report healthy, connects to it over the Compose network, and publishes port 8080. Stop everything with `docker compose --profile app down`.

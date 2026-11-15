@@ -1,6 +1,6 @@
 # Agent protocol
 
-Status: proposed sketch. This is not a full specification. Message names and fields may change in the implementation pull requests. The guarantees stated here must not.
+Status: partly implemented. Connection setup, close codes, the envelope, versioning, session start, and heartbeats are implemented as described here, with the details they settled. Snapshots, observations, acknowledgements, `status`, and jobs are still a sketch: their message names and fields may change in the implementation pull requests. The guarantees stated here must not.
 
 The decisions behind this protocol are in [Agent synchronization and jobs](architecture.md#agent-synchronization-and-jobs): Ed25519 agent keys, single-use enrollment tokens, and one WebSocket connection per agent.
 
@@ -14,17 +14,30 @@ The agent opens a connection in three requests. All requests go to the configure
 | 2 | `POST /api/v1/agent/auth/session` with the agent ID, key ID, the challenge fields, and a signature | A session token valid for 15 minutes. |
 | 3 | `GET /api/v1/agent/connect` with `Authorization: Bearer <session token>` and `Sec-WebSocket-Protocol: vn-agent.v1` | A WebSocket connection. |
 
-Challenges are stateless. The MAC is HMAC-SHA256 over the agent ID, challenge ID, nonce, and expiry, keyed with a challenge key from server configuration that all server replicas share. The challenge endpoint answers for unknown agent IDs too and writes nothing, so it does not reveal which agents exist and gives unauthenticated clients no write path.
+Challenges are stateless. The MAC is HMAC-SHA256 over the agent ID, challenge ID, nonce, and expiry, keyed with a challenge key from server configuration (`agents.challenge_key_env`) that all server replicas share. Without that setting the three endpoints answer `503 agents_disabled`. The challenge endpoint answers for unknown agent IDs too and writes nothing, so it does not reveal which agents exist and gives unauthenticated clients no write path.
 
 The session endpoint checks the MAC and the expiry before it verifies the signature. It enforces single use only when it creates a session: the same transaction inserts the challenge ID into a table of consumed challenges with a unique constraint. Rows are deleted once their challenge has expired. Rotating the challenge key invalidates only outstanding challenges.
 
-The challenge, session, and enrollment endpoints are rate-limited per source address, resolved through configured trusted proxies.
+The challenge, session, and enrollment endpoints are rate-limited per source address, resolved through configured trusted proxies. So are failed connection attempts.
+
+### Request and response details
+
+All IDs are UUIDs, byte strings are URL-safe base64 without padding, and timestamps are RFC 3339.
+
+- `POST /api/v1/agent/auth/challenge` takes `{ "agent_id" }` and answers `200` with `{ "challenge_id", "nonce", "expires_at", "mac" }`. `expires_at` is in whole seconds. Every request counts against the limit (a burst of 20, then one every 3 seconds).
+- The MAC input is `"vn-agent-challenge-v1" 0x00 agent_id challenge_id nonce expires_at`, with the IDs as their 16 raw bytes, the nonce as its 32 raw bytes, and the expiry as Unix seconds in 8 big-endian bytes. The agent treats the MAC as opaque.
+- `POST /api/v1/agent/auth/session` takes the challenge fields unchanged plus `agent_id`, `key_id`, and `signature`, and answers `201` with `{ "token", "expires_at" }`. Only failed requests count against the limit (a burst of 10, then one every 6 seconds).
+- Session errors, all JSON: `401 challenge_invalid` (the MAC does not match, for example because the challenge was issued for another agent or altered, or the expiry is later than the server would issue), `401 challenge_expired`, `401 challenge_used`, `401 session_failed` (unknown agent, a key ID that is not the agent's, or a bad signature, deliberately not distinguished), and `403 agent_revoked`, which only an agent with a valid signature receives. Refusals for an existing agent are audited as `agent.session_failed`.
+- Session tokens read `vn_agent_session_<43 characters>`. They stay valid for 15 minutes and may open several connections in that time. Revoking the agent deletes them. Expired sessions and consumed challenges are deleted every minute.
+- `GET /api/v1/agent/connect` errors before the upgrade: `503 agents_disabled`, `429 rate_limited`, `4xx websocket_required` for a request that is not a WebSocket upgrade, `400 unsupported_protocol` (the message lists the supported subprotocols), `401 session_invalid`, and `403 agent_revoked`.
 
 The signature covers a domain-separated message:
 
 ```text
 "vn-agent-session-v1" 0x00 installation_id agent_id key_id challenge_id nonce
 ```
+
+The IDs are their 16 raw bytes, the key ID its 43 ASCII characters, and the nonce its 32 raw bytes, so every field has a fixed length. The server verifies it with `ed25519-dalek`'s strict verification.
 
 The installation ID comes from enrollment and is stored by the agent. Including it stops a challenge from one VN installation being answered for another. Enrollment signatures use the prefix `vn-agent-enroll-v1` over the token ID, public key, and installation ID. The agent reads the installation ID from an unauthenticated server information endpoint before enrolling.
 
@@ -42,6 +55,12 @@ The server rejects failed steps with an HTTP status and a JSON error before upgr
 | 4009 | Superseded by a newer connection for the same agent | Back off. Warn unless this replica has lost its leader Lease: otherwise two agent instances may be running. |
 | 4010 | Identity mismatch, such as a different cluster fingerprint | Stop connecting and report the mismatch. |
 
+The server also uses standard codes: 1001 when it shuts down, 1009 for a message over the size limit, and 1011 for an internal error. The agent reconnects with backoff after any code not in the table. `vn-agent` exits with status 2 after 4003 or 4010.
+
+The server records each accepted connection in `agent_connections`: the sync epoch, open and last-seen times, the agent and Kubernetes versions from `hello`, and the close time and code. A close without a close frame is recorded as 1006, an agent close frame without a code as 1005, and rows left open by a stopped server are closed at its next startup with no code.
+
+The server uses 4001 when a session expires or is deleted between the upgrade and the start of the connection. A fingerprint mismatch is audited as `agent.connect_refused`.
+
 ## Envelope
 
 Messages are JSON text frames in version 1. Each message has the same envelope:
@@ -52,9 +71,9 @@ Messages are JSON text frames in version 1. Each message has the same envelope:
 
 - `type` names the message.
 - `seq` is a per-connection, per-direction counter that starts at 1 and increases by 1. A gap or a repeat is a protocol error.
-- `body` holds the message fields.
+- `body` holds the message fields. It is required, and is `{}` for a message without fields.
 
-Receivers ignore unknown fields. A receiver that gets an unknown message type replies with `error { code: "unsupported_type", ref_seq }` and continues. The server limits message size (proposed: 1 MiB) and announces the limit in `welcome`.
+Version 1 uses text frames only. A binary frame is a protocol error. Receivers ignore unknown fields. A receiver that gets an unknown message type replies with `error { code: "unsupported_type", ref_seq }` and continues. The server limits message size (1 MiB) and announces the limit in `welcome`. Errors carry a `code` and optionally a `message` and `ref_seq`.
 
 ## Versioning
 
@@ -66,6 +85,13 @@ Receivers ignore unknown fields. A receiver that gets an unknown message type re
 
 1. The server sends `welcome` with the connection ID, the sync epoch, the heartbeat interval, the acknowledgement window, the message size limit, and its capabilities.
 2. The agent sends `hello` with its version, capabilities, cluster fingerprint, the Kubernetes API server version, and, once jobs exist, its running and unacknowledged job attempts.
+
+```json
+{ "type": "welcome", "seq": 1, "body": { "connection_id": "…", "sync_epoch": 7, "heartbeat_interval_seconds": 15, "ack_window": 256, "max_message_bytes": 1048576, "capabilities": [] } }
+{ "type": "hello", "seq": 1, "body": { "agent_version": "0.1.0", "capabilities": [], "cluster_fingerprint": "<kube-system UID>", "kubernetes_version": "v1.35.0" } }
+```
+
+`kubernetes_version` is the API server's `gitVersion` from `/version`, or `null` when the agent could not read it. The server closes the connection with 4000 when the first agent message is not `hello` or `hello` does not arrive within 30 seconds, and with 4010 when the fingerprint differs from the one registered at enrollment. It records the versions on the connection and the agent version on the agent. Version 1 defines no capabilities yet.
 
 The server allocates a sync epoch each time it accepts a connection, by atomically incrementing a counter on the source record in PostgreSQL. The source record is separate from the cluster record, so a cluster can later have several sources with non-overlapping scopes (see the agent enrollment section of the architecture document). The counter belongs to the source, not the agent, so it keeps increasing when a replacement agent enrolls for an existing source. A source has one active agent at a time. A new connection supersedes any older connection for the same agent, which the server closes with code 4009. The sync epoch orders observations across connections and across agent replacements, and the epoch fence (see [Observations](#observations)) stops a superseded connection from persisting anything.
 
@@ -137,12 +163,14 @@ Duplicates come from reconnect snapshots and watcher relists. Messages from a su
 
 ## Reconnect
 
-- The agent reconnects with exponential backoff and jitter, from 1 second up to 60 seconds, and follows the close code table.
+- The agent reconnects with exponential backoff and jitter, from 1 second up to 60 seconds, and follows the close code table. Each delay is drawn from the upper half of its step, and the backoff starts over after a connection that stayed open for 30 seconds.
+- The agent reuses its session token for new connections until a minute before it expires, then answers a new challenge.
 - Every new connection starts fresh watchers and sends a full snapshot of every collection. Version 1 does not resume watches from an earlier connection. Resuming can be added later as a capability.
 
 ## Heartbeats, connection status, and freshness
 
-- The server sends a WebSocket ping every 15 seconds and closes the connection after 45 seconds without traffic. The interval stays below the 60-second idle timeout common in proxies.
+- The server sends a WebSocket ping every 15 seconds and closes the connection with 4000 after 45 seconds without traffic. The interval stays below the 60-second idle timeout common in proxies. The agent treats three heartbeat intervals without traffic from the server (at least 15 seconds) as a dead connection and reconnects.
+- Every 30 seconds each connection records its last-seen time and rechecks, in one query, that its agent is active (otherwise 4003) and its row still open (otherwise 4009). When the revocation listener loses its database connection, every connection rechecks as soon as it is back.
 - The agent sends `status` every 30 seconds with each collection's state (`snapshotting`, `watching`, or `error` with a reason) and the time of its last watch event.
 - Connection status belongs to the agent. It is connected while an authenticated connection is open and has carried traffic within 45 seconds, and disconnected since a recorded time otherwise. The server records the connection's last-seen time at most every 30 seconds. A record older than 90 seconds counts as disconnected, which covers a server process that stopped without recording the disconnect.
 - Data freshness belongs to each collection. A collection is current when its agent is connected, a snapshot has completed in this connection, and the latest `status` reports its watch healthy. Otherwise it is stale since the time it stopped being current. The UI shows the last completed snapshot time, the last observation time, and any collection error.

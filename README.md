@@ -20,9 +20,11 @@ Open [project-priorities.html](project-priorities.html) in a browser for the cur
 
 Early development. The repository contains the application skeleton from the first milestone step: a Rust workspace (server, agent stub, and `vn` CLI), configuration-file validation, PostgreSQL migrations, and a React web UI that reports server health.
 
-The user-access half of the second milestone step is also in place: browser sign-in through an OIDC provider (such as Pocket ID), server-side sessions, an installation admin role mapped from a provider claim, and projects with per-project `viewer` and `operator` roles. Every API route except health and sign-in requires a session. Installation admins can create agent enrollment tokens, and agents enroll and can be revoked through the API.
+The user-access half of the second milestone step is also in place: browser sign-in through an OIDC provider (such as Pocket ID), server-side sessions, an installation admin role mapped from a provider claim, and projects with per-project `viewer` and `operator` roles. Every API route except health and sign-in requires a session.
 
-The agent can be packaged and installed: `docker build --target agent` builds the `vn-agent` image, `deploy/kubernetes/vn-agent.yaml` installs it (the server also serves it at `/api/v1/agent/manifests/kubernetes.yaml`), and `scripts/dev-cluster.sh` runs it in a local kind cluster. The agent's connection to the server, cluster inventory, and CLI sign-in are not implemented yet.
+Agents can enroll with single-use tokens and hold an authenticated WebSocket connection to the server: they sign a stateless server challenge with their Ed25519 key for a short-lived session token, then connect with the `vn-agent.v1` subprotocol. The server records connections, supersedes an older connection of the same agent, and closes a revoked agent's connection. `vn-agent` enrolls itself, stores its identity in a Kubernetes Secret (or a file on a development host), and reconnects with backoff.
+
+The agent can be packaged and installed: `docker build --target agent` builds the `vn-agent` image, `deploy/kubernetes/vn-agent.yaml` installs it (the server also serves it at `/api/v1/agent/manifests/kubernetes.yaml`), and `scripts/dev-cluster.sh` runs it in a local kind cluster. CLI sign-in and cluster inventory are not implemented yet.
 
 ## Quick start
 

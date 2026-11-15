@@ -571,6 +571,42 @@ async fn a_token_enrolls_only_once() {
 }
 
 #[tokio::test]
+async fn repeating_an_enrollment_with_the_same_key_returns_the_same_agent() {
+    let h = harness!(Harness::start());
+    let token = h.new_cluster_token().await;
+    let key = AgentKey::generate();
+    let body = key.body(&token, h.installation_id, FINGERPRINT);
+    let first = h.enroll(&body).await;
+    assert_eq!(first.status, StatusCode::CREATED, "{:?}", first.json);
+
+    // As after a lost response: the same token and key get the original result.
+    let again = h.enroll(&body).await;
+    assert_eq!(again.status, StatusCode::CREATED, "{:?}", again.json);
+    assert_eq!(again.json, first.json);
+    assert_eq!(h.count("agents").await, 1);
+    assert_eq!(h.count("clusters").await, 1);
+
+    // A different fingerprint is not a repeat.
+    let moved = h
+        .enroll(&key.body(&token, h.installation_id, "another-cluster"))
+        .await;
+    moved.assert_generic_failure();
+
+    // Once the agent is revoked, the token cannot hand its identity out again.
+    let agent_id = first.json["agent_id"].as_str().unwrap();
+    sqlx::query(
+        "UPDATE agents SET revoked_at = now(), revocation_reason = 'revoked' WHERE id = $1::uuid",
+    )
+    .bind(agent_id)
+    .execute(&h.db.pool)
+    .await
+    .unwrap();
+    h.enroll(&body).await.assert_generic_failure();
+
+    h.finish().await;
+}
+
+#[tokio::test]
 async fn an_expired_token_is_refused() {
     let h = harness!(Harness::start());
     let token = h.new_cluster_token().await;

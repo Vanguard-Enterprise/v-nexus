@@ -20,6 +20,7 @@ clap.workspace = true
 cookie.workspace = true
 ed25519-dalek.workspace = true
 getrandom.workspace = true
+hmac.workspace = true
 ipnet.workspace = true
 openidconnect.workspace = true
 reqwest.workspace = true
@@ -31,6 +32,7 @@ thiserror.workspace = true
 tokio.workspace = true
 tower-http.workspace = true
 tracing.workspace = true
+tungstenite.workspace = true
 tracing-subscriber.workspace = true
 url.workspace = true
 uuid.workspace = true
@@ -38,11 +40,13 @@ vn-config.workspace = true
 vn-core.workspace = true
 
 [dev-dependencies]
+futures-util.workspace = true
 http-body-util = { workspace = true, features = ["channel"] }
 rand.workspace = true
 rsa.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
+tokio-tungstenite.workspace = true
 tower.workspace = true
 
 [lints]

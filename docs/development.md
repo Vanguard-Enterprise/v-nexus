@@ -306,7 +306,7 @@ kubectl --context kind-vn-dev -n vn-agent get secret vn-agent-identity
 
 To enroll the cluster again, for example after revoking its agent, create a `replace_source` token, put it in `vn-agent-enrollment`, delete the `vn-agent-identity` Secret, and restart the Deployment. Remove the agent with `kubectl delete -f deploy/kubernetes/vn-agent.yaml`, which also deletes the namespace and both Secrets.
 
-The image is not published to a registry yet. For a cluster other than the local one, build it (see [Build and run the container](#build-and-run-the-container)), push it to a registry the cluster can pull from, and change the Deployment's image to match.
+CI publishes the agent image to `ghcr.io/vanguard-enterprise/vn-agent` from every commit on `main` (see [Published images](#published-images)), so a cluster that can pull from GHCR needs no local build. The manifest uses the `latest` tag; pin a `sha-<commit>` tag instead for a cluster that should not change under you.
 
 ## Run tests and checks
 
@@ -356,3 +356,12 @@ docker compose --profile app up -d --build
 ```
 
 To enable sign-in there, uncomment and fill in the `auth` block in the `vn-config` config in `compose.yaml` and export `VN_OIDC_CLIENT_SECRET` first. To let agents connect, uncomment the `agents` block and export `VN_AGENT_CHALLENGE_KEY` (see [Connect an agent](#connect-an-agent)). The `server` service waits for PostgreSQL to report healthy, connects to it over the Compose network, and publishes port 8080. Stop everything with `docker compose --profile app down`.
+
+### Published images
+
+After every check passes on `main`, the `Publish images` CI job pushes both images to GHCR, each tagged `sha-<full commit SHA>` and `latest`:
+
+- `ghcr.io/vanguard-enterprise/vn-server`: the server, with the web UI and the `vn` CLI.
+- `ghcr.io/vanguard-enterprise/vn-agent`: the agent.
+
+Pull requests only build the images. Deploy a `sha-` tag, so a deployment names the exact commit it runs.

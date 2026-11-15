@@ -61,8 +61,8 @@ The provider must sign ID tokens with an asymmetric algorithm (RS*, PS*, ES*, or
 [Pocket ID](https://pocket-id.org) is the provider this project develops and deploys against. These steps assume an instance at `https://id.example.com`; use your own URL.
 
 1. Sign in to Pocket ID as an admin. Under **Administration**, open **User Groups** and add a group with the name `vn-admins`, then add your user to it. Pocket ID reports each group's name (not its friendly name) in the `groups` claim, which the example config maps to the installation `admin` role.
-2. Open **OIDC Clients** and add a client, for example named `Vanguard Nexus`. Set the callback URL to `<public_url>/api/v1/auth/callback`, for example `http://<host>:5173/api/v1/auth/callback` with the Vite dev server. Leave **Public Client** off, since VN is a confidential client with a client secret, and turn **PKCE** on.
-3. Save the client. Copy the client ID into `auth.client_id`, and the client secret, which is shown only once, into `VN_OIDC_CLIENT_SECRET`.
+2. Open **OIDC Clients** and add a client, for example named `Vanguard Nexus`. Set the callback URL to `<public_url>/api/v1/auth/callback`, for example `http://<host>:5173/api/v1/auth/callback` with the Vite dev server. Turn **PKCE** on. Turn **Public Client** on as well unless you want a client secret: VN then signs in with PKCE alone.
+3. Save the client and copy the client ID into `auth.client_id`. For a public client, delete the `client_secret_env` line from `auth` and skip `VN_OIDC_CLIENT_SECRET`. For a confidential client, copy the client secret, which is shown only once, into `VN_OIDC_CLIENT_SECRET`.
 4. Set `auth.issuer_url` to the Pocket ID URL (`https://id.example.com`, without a trailing slash). The example config already sets `admin.claim: groups` and `admin.values: [vn-admins]`, and requests the `groups` scope in `auth.scopes`. Pocket ID leaves the `groups` claim out unless that scope is requested, so keep it there.
 5. Optionally restrict the client to selected user groups in its settings, so only members of those groups can sign in to VN at all.
 

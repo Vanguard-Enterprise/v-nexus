@@ -2,6 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router";
 import { clustersQueryOptions } from "../api";
 import type { Cluster } from "../api";
+import { formatDateTime } from "../lib/format";
 import { CONNECTION, clusterCounts, clusterPath } from "../lib/labels";
 import { ErrorState } from "./ErrorState";
 import { Missing } from "./Missing";
@@ -17,7 +18,7 @@ interface ClustersPanelProps {
 }
 
 export function ClustersPanel({ slug, canRegister, registering, onRegister }: ClustersPanelProps) {
-  const { data, error, isPending, refetch } = useQuery(clustersQueryOptions(slug));
+  const { data, dataUpdatedAt, error, isPending, refetch } = useQuery(clustersQueryOptions(slug));
 
   return (
     <section className="panel" aria-labelledby="clusters-heading" aria-busy={isPending}>
@@ -35,6 +36,12 @@ export function ClustersPanel({ slug, canRegister, registering, onRegister }: Cl
         <div className="panel__message">
           <ErrorState error={error} subject="Clusters" onRetry={() => void refetch()} />
         </div>
+      )}
+      {error && data && (
+        <p className="panel__message callout" data-tone="degraded" role="alert">
+          The cluster list could not be refreshed. {error.message} Showing the status received at{" "}
+          {formatDateTime(new Date(dataUpdatedAt).toISOString())}.
+        </p>
       )}
       {data?.length === 0 && (
         <div className="empty">

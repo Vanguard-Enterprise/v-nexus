@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useId, useState } from "react";
-import { MAX_RESOURCE_PAGE, isNamespaced, resourcesQueryOptions } from "../api";
+import { isNamespaced, namespaceNamesQueryOptions, resourcesQueryOptions } from "../api";
 import type { Collection } from "../api";
 import { collectionLabel, collectionNoun } from "../lib/labels";
 import { ErrorState } from "./ErrorState";
@@ -72,11 +72,8 @@ function FilterBar({ slug, clusterId, filters, namespaced, onChange }: FilterBar
     };
   }, [text, filters.search, onChange]);
 
-  const namespaces = useQuery({
-    ...resourcesQueryOptions(slug, clusterId, { collection: "v1/namespaces", limit: MAX_RESOURCE_PAGE }),
-    enabled: namespaced,
-  });
-  const namespaceNames = namespaces.data?.resources.map((resource) => resource.name) ?? [];
+  const namespaces = useQuery({ ...namespaceNamesQueryOptions(slug, clusterId), enabled: namespaced });
+  const namespaceNames = [...(namespaces.data ?? [])];
   if (filters.namespace !== "" && !namespaceNames.includes(filters.namespace)) {
     namespaceNames.unshift(filters.namespace);
   }

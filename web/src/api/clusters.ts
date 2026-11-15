@@ -410,6 +410,27 @@ export function fetchResources(
   });
 }
 
+/** Upper bound on namespace pages followed for the namespace filter (10,000 namespaces). */
+export const MAX_NAMESPACE_PAGES = 20;
+
+/** Names of the cluster's present namespaces, following `next_cursor` across pages. */
+export async function fetchNamespaceNames(slug: string, clusterId: string, signal?: AbortSignal): Promise<string[]> {
+  const names: string[] = [];
+  let cursor: string | undefined;
+  for (let page = 0; page < MAX_NAMESPACE_PAGES; page += 1) {
+    const result = await fetchResources(
+      slug,
+      clusterId,
+      { collection: "v1/namespaces", limit: MAX_RESOURCE_PAGE, cursor },
+      signal,
+    );
+    names.push(...result.resources.map((resource) => resource.name));
+    if (result.next_cursor === null || result.next_cursor === cursor) break;
+    cursor = result.next_cursor;
+  }
+  return names;
+}
+
 export function fetchResource(
   slug: string,
   clusterId: string,

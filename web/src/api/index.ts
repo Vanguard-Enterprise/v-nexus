@@ -16,10 +16,12 @@ export {
 export type { Project, ProjectMember, ProjectPermissions, ProjectRole } from "./projects";
 export {
   COLLECTIONS,
+  MAX_NAMESPACE_PAGES,
   MAX_RESOURCE_PAGE,
   fetchCluster,
   fetchClusters,
   fetchResource,
+  fetchNamespaceNames,
   fetchResources,
   isCollection,
   isNamespaced,
@@ -83,6 +85,7 @@ export {
   healthQueryOptions,
   meQueryOptions,
   membersQueryOptions,
+  namespaceNamesQueryOptions,
   projectQueryOptions,
   projectsQueryOptions,
   resourceQueryOptions,

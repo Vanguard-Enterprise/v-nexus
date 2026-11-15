@@ -145,6 +145,31 @@ describe("Resource browser", () => {
     expect(await screen.findByText("No deployments match these filters.")).toBeInTheDocument();
   });
 
+  it("follows namespace pages to fill the namespace filter", async () => {
+    const fetchMock = serve();
+    const pages: Record<string, { names: string[]; next: string | null }> = {
+      "": { names: ["default", "frontend"], next: "p2" },
+      p2: { names: ["zz-late"], next: null },
+    };
+    const base = fetchMock.getMockImplementation();
+    fetchMock.mockImplementation((input, init) => {
+      const url = new URL(input instanceof Request ? input.url : input.toString(), "http://vn.test");
+      if (url.pathname === RESOURCES && url.searchParams.get("collection") === "v1/namespaces") {
+        const page = pages[url.searchParams.get("cursor") ?? ""];
+        return Promise.resolve(
+          jsonResponse({ resources: page?.names.map(namespaceResource) ?? [], next_cursor: page?.next ?? null }),
+        );
+      }
+      return base ? base(input, init) : Promise.reject(new Error("no handler"));
+    });
+    open();
+    await screen.findByRole("table", { name: "Deployments, page 1" });
+
+    const select = screen.getByLabelText("Namespace");
+    expect(await within(select).findByRole("option", { name: "zz-late" })).toBeInTheDocument();
+    expect(within(select).getByRole("option", { name: "frontend" })).toBeInTheDocument();
+  });
+
   it("hides the namespace filter for cluster-scoped collections", async () => {
     serve();
     open("?collection=v1/nodes");

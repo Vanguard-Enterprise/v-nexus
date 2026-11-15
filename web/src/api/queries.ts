@@ -1,7 +1,7 @@
 import { keepPreviousData, queryOptions } from "@tanstack/react-query";
 import { fetchAgents } from "./agents";
 import { fetchMe } from "./auth";
-import { fetchCluster, fetchClusters, fetchResource, fetchResources } from "./clusters";
+import { fetchCluster, fetchClusters, fetchNamespaceNames, fetchResource, fetchResources } from "./clusters";
 import type { ResourceQuery } from "./clusters";
 import { fetchEnrollmentTokens } from "./enrollment";
 import { fetchHealth } from "./health";
@@ -71,6 +71,15 @@ export function resourcesQueryOptions(slug: string, clusterId: string, query: Re
     refetchInterval: CLUSTER_REFETCH_INTERVAL_MS,
     // Keep the current page on screen while the next one loads.
     placeholderData: keepPreviousData,
+  });
+}
+
+export function namespaceNamesQueryOptions(slug: string, clusterId: string) {
+  return queryOptions({
+    queryKey: ["project", slug, "clusters", clusterId, "namespace-names"],
+    queryFn: ({ signal }) => fetchNamespaceNames(slug, clusterId, signal),
+    // Namespaces come and go while the page is open.
+    refetchInterval: CLUSTER_REFETCH_INTERVAL_MS,
   });
 }
 

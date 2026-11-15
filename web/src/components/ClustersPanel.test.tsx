@@ -1,4 +1,4 @@
-import { screen, within } from "@testing-library/react";
+import { act, screen, within } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { ClustersPanel } from "./ClustersPanel";
 import { DISCONNECTED, NEVER_CONNECTED, cluster } from "../test/fixtures";
@@ -83,5 +83,24 @@ describe("ClustersPanel", () => {
     expect(fresh).toHaveTextContent("Never connected");
     expect(fresh).toHaveTextContent("None yet");
     expect(fresh).toHaveTextContent("Never");
+  });
+
+  it("keeps the list on screen and says when a refresh fails", async () => {
+    let failing = false;
+    serveApi({
+      "GET /api/v1/projects/prod/clusters": () =>
+        failing
+          ? jsonResponse({ error: "internal", message: "database unavailable" }, 500)
+          : jsonResponse({ clusters: [cluster()] }),
+    });
+    const { client } = renderPanel();
+    await screen.findByRole("link", { name: "prod-east" });
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+
+    failing = true;
+    await act(() => client.refetchQueries());
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(/The cluster list could not be refreshed/);
+    expect(row("prod-east")).toHaveTextContent("Connected");
   });
 });

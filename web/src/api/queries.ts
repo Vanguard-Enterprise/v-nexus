@@ -66,6 +66,9 @@ export function resourcesQueryOptions(slug: string, clusterId: string, query: Re
   return queryOptions({
     queryKey: ["project", slug, "clusters", clusterId, "resources", query],
     queryFn: ({ signal }) => fetchResources(slug, clusterId, query, signal),
+    // Inventory changes while the page is open, for example when the first snapshot
+    // arrives, so poll at the same rate as the cluster status.
+    refetchInterval: CLUSTER_REFETCH_INTERVAL_MS,
     // Keep the current page on screen while the next one loads.
     placeholderData: keepPreviousData,
   });
@@ -75,6 +78,7 @@ export function resourceQueryOptions(slug: string, clusterId: string, resourceId
   return queryOptions({
     queryKey: ["project", slug, "clusters", clusterId, "resource", resourceId],
     queryFn: ({ signal }) => fetchResource(slug, clusterId, resourceId, signal),
+    refetchInterval: CLUSTER_REFETCH_INTERVAL_MS,
   });
 }
 

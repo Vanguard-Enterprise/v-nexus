@@ -16,9 +16,18 @@ pub struct ClusterInfo {
 /// A Kubernetes client from the in-cluster configuration, falling back to a kubeconfig
 /// (`KUBECONFIG` or `~/.kube/config`) when running on a development host.
 pub async fn client() -> anyhow::Result<kube::Client> {
-    kube::Client::try_default()
-        .await
-        .context("failed to configure a Kubernetes client (in-cluster or kubeconfig)")
+    // `Config::infer` prefers a kubeconfig. In a pod the service account must win, even
+    // if the image happens to contain a kubeconfig.
+    let config = match kube::Config::incluster() {
+        Ok(config) => config,
+        Err(in_cluster) => {
+            tracing::debug!(error = %in_cluster, "not in a cluster; using the kubeconfig");
+            kube::Config::infer()
+                .await
+                .context("failed to configure a Kubernetes client (in-cluster or kubeconfig)")?
+        }
+    };
+    kube::Client::try_from(config).context("failed to build the Kubernetes client")
 }
 
 /// The cluster fingerprint: the UID of the `kube-system` namespace.

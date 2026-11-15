@@ -6,13 +6,29 @@
 //! for example with `ack`. Returning a [`Close`] ends the connection with that code, for
 //! example [`CloseCode::Revoked`] when an ingest transaction finds the agent revoked, or
 //! [`CloseCode::Superseded`] when the epoch fence finds a newer connection.
+//!
+//! Inventory messages are buffered and applied in batches by [`Ingest`]: a batch is
+//! applied when it reaches [`MAX_BATCH`] messages, or [`BATCH_DELAY`] after its first
+//! message, whichever comes first. The connection calls [`Dispatcher::flush`] at
+//! [`Dispatcher::flush_deadline`]. Each batch is one transaction, acknowledged with a
+//! cumulative `ack` after it commits.
 
 use std::borrow::Cow;
+use std::time::Duration;
 
 use axum::extract::ws::{Message as WsMessage, WebSocket};
 use sqlx::PgPool;
+use tokio::time::Instant;
 use uuid::Uuid;
-use vn_core::agent_protocol::{AgentMessage, CloseCode, Message, encode};
+use vn_core::agent_protocol::{Ack, AgentMessage, CloseCode, Message, encode};
+
+use super::ingest::{Ingest, InventoryMessage};
+
+/// Most inventory messages applied in one transaction.
+pub(crate) const MAX_BATCH: usize = 128;
+
+/// Longest an inventory message waits for more to join its batch.
+pub(crate) const BATCH_DELAY: Duration = Duration::from_millis(20);
 
 /// What a connection knows about its agent.
 #[derive(Debug, Clone)]
@@ -101,14 +117,65 @@ pub(crate) enum Dispatched {
     Unsupported,
 }
 
-/// Per-connection state for messages after `hello`. Ingest keeps its snapshot
-/// bookkeeping here.
-#[derive(Debug, Default)]
-pub(crate) struct Dispatcher {}
+/// Per-connection state for messages after `hello`: the ingest bookkeeping and the
+/// batch being collected.
+#[derive(Debug)]
+pub(crate) struct Dispatcher {
+    ingest: Ingest,
+    pending: Vec<(u64, InventoryMessage)>,
+    /// When the pending batch must be applied.
+    deadline: Option<Instant>,
+}
 
 impl Dispatcher {
-    pub(crate) fn new(_ctx: &ConnectionContext) -> Self {
-        Self {}
+    /// Called after `hello`, so `ctx` has the Kubernetes version.
+    pub(crate) fn new(ctx: &ConnectionContext) -> Self {
+        Self {
+            ingest: Ingest::new(ctx),
+            pending: Vec::new(),
+            deadline: None,
+        }
+    }
+
+    /// When [`Dispatcher::flush`] must run, if a batch is pending.
+    pub(crate) fn flush_deadline(&self) -> Option<Instant> {
+        self.deadline
+    }
+
+    /// Applies the pending batch, then acknowledges it and answers any messages it
+    /// ignored.
+    pub(crate) async fn flush(
+        &mut self,
+        ctx: &ConnectionContext,
+        out: &mut Outbound<'_>,
+    ) -> Result<(), Close> {
+        self.deadline = None;
+        let batch = std::mem::take(&mut self.pending);
+        let Some(&(last_seq, _)) = batch.last() else {
+            return Ok(());
+        };
+        let outcome = self.ingest.apply(ctx, batch).await?;
+        for notice in &outcome.notices {
+            out.send(notice).await?;
+        }
+        out.send(&Ack { seq: last_seq }).await?;
+        Ok(())
+    }
+
+    async fn queue(
+        &mut self,
+        ctx: &ConnectionContext,
+        seq: u64,
+        message: InventoryMessage,
+        out: &mut Outbound<'_>,
+    ) -> Result<Dispatched, Close> {
+        self.pending.push((seq, message));
+        self.deadline
+            .get_or_insert_with(|| Instant::now() + BATCH_DELAY);
+        if self.pending.len() >= MAX_BATCH {
+            self.flush(ctx, out).await?;
+        }
+        Ok(Dispatched::Handled)
     }
 
     /// Handles message `seq`. Messages arrive in order, one at a time.
@@ -117,10 +184,18 @@ impl Dispatcher {
         ctx: &ConnectionContext,
         seq: u64,
         message: AgentMessage,
-        _out: &mut Outbound<'_>,
+        out: &mut Outbound<'_>,
     ) -> Result<Dispatched, Close> {
-        match message {
-            AgentMessage::Hello(_) => Err(Close::protocol("`hello` may be sent only once")),
+        let inventory = match message {
+            AgentMessage::SnapshotStart(m) => InventoryMessage::SnapshotStart(m),
+            AgentMessage::Upsert(m) => InventoryMessage::Upsert(m),
+            AgentMessage::Delete(m) => InventoryMessage::Delete(m),
+            AgentMessage::SnapshotEnd(m) => InventoryMessage::SnapshotEnd(m),
+            AgentMessage::SnapshotAbort(m) => InventoryMessage::SnapshotAbort(m),
+            AgentMessage::CollectionError(m) => InventoryMessage::CollectionError(m),
+            AgentMessage::Hello(_) => {
+                return Err(Close::protocol("`hello` may be sent only once"));
+            }
             AgentMessage::Error(error) => {
                 tracing::warn!(
                     agent_id = %ctx.agent_id,
@@ -130,9 +205,10 @@ impl Dispatcher {
                     message = error.message.as_deref().unwrap_or(""),
                     "agent reported an error"
                 );
-                Ok(Dispatched::Handled)
+                return Ok(Dispatched::Handled);
             }
-            AgentMessage::Unknown { .. } => Ok(Dispatched::Unsupported),
-        }
+            AgentMessage::Unknown { .. } => return Ok(Dispatched::Unsupported),
+        };
+        self.queue(ctx, seq, inventory, out).await
     }
 }

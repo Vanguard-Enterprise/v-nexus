@@ -14,6 +14,9 @@ use vn_config::Config;
 /// Upper bound on closing the database pool during shutdown.
 const POOL_CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Upper bound on agent connections recording their closure during shutdown.
+const AGENT_CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Vanguard Nexus server.
 #[derive(Debug, Parser)]
 #[command(name = "vn-server", version, about)]
@@ -108,6 +111,20 @@ async fn run(args: Args) -> anyhow::Result<()> {
              except health answers 401"
         ),
     }
+    match &config.agents {
+        Some(agents) => {
+            state = state.with_agent_challenge_key(agents.resolve_challenge_key()?);
+            tracing::info!("agent connections enabled");
+        }
+        None => tracing::warn!(
+            "config has no `agents` section: agents can enroll but not connect, and the \
+             agent challenge, session, and connect endpoints answer 503"
+        ),
+    }
+    let agent_tasks = state
+        .start_agent_tasks()
+        .await
+        .context("failed to start agent connection tasks")?;
 
     let app = vn_server::router(state, static_dir.as_deref());
     let listener = TcpListener::bind(config.server.listen)
@@ -122,6 +139,10 @@ async fn run(args: Args) -> anyhow::Result<()> {
     .with_graceful_shutdown(shutdown_signal())
     .await
     .context("server error")?;
+
+    // Upgraded agent connections outlive the HTTP server's graceful shutdown. Close them
+    // so they record their closure before the pool goes away.
+    agent_tasks.shutdown(AGENT_CLOSE_TIMEOUT).await;
 
     // Closing waits for checked-out connections. Bound it so a stalled database cannot
     // block shutdown indefinitely.

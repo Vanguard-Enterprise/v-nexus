@@ -14,7 +14,7 @@ use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::{DefaultOnResponse, TraceLayer};
 use tracing::Level;
 
-use crate::agents;
+use crate::agents::{self, AgentConnectionSettings, AgentTasks, ChallengeKey, ConnectionHub};
 use crate::auth::{self, AuthService};
 use crate::error::api_error;
 use crate::health::{DatabaseHealth, health};
@@ -28,10 +28,28 @@ const ENROLL_RATE_LIMIT: RateLimit = RateLimit {
     refill: Duration::from_secs(6),
 };
 
+/// Challenge requests per client address: a burst of 20, then one every 3 seconds.
+/// Every request counts, because a challenge does not show whether it gets used.
+const CHALLENGE_RATE_LIMIT: RateLimit = RateLimit {
+    burst: 20,
+    refill: Duration::from_secs(3),
+};
+
+/// Session requests and connection attempts per client address: a burst of 10, then one
+/// every 6 seconds. Successful ones do not count.
+const AGENT_AUTH_RATE_LIMIT: RateLimit = RateLimit {
+    burst: 10,
+    refill: Duration::from_secs(6),
+};
+
 /// Largest accepted enrollment request body.
 const ENROLL_BODY_LIMIT: usize = 16 * 1024;
 
-/// How long an admitted enrollment attempt may take to send its body.
+/// Largest accepted challenge or session request body.
+const AGENT_AUTH_BODY_LIMIT: usize = 4 * 1024;
+
+/// How long an admitted enrollment, challenge, or session request may take to send its
+/// body.
 const ENROLL_BODY_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Shared state for request handlers.
@@ -43,6 +61,14 @@ pub struct AppState {
     pub(crate) trusted_proxies: Arc<[IpNet]>,
     pub(crate) enroll_limiter: Arc<RateLimiter>,
     pub(crate) enroll_body_timeout: Duration,
+    /// Keys challenge MACs. Without it the challenge, session, and connect endpoints
+    /// answer 503.
+    pub(crate) challenge_key: Option<Arc<ChallengeKey>>,
+    pub(crate) challenge_limiter: Arc<RateLimiter>,
+    pub(crate) session_limiter: Arc<RateLimiter>,
+    pub(crate) connect_limiter: Arc<RateLimiter>,
+    pub(crate) agent_settings: AgentConnectionSettings,
+    pub(crate) agent_hub: Arc<ConnectionHub>,
 }
 
 impl AppState {
@@ -55,7 +81,35 @@ impl AppState {
             trusted_proxies: Arc::new([]),
             enroll_limiter: Arc::new(RateLimiter::new(ENROLL_RATE_LIMIT)),
             enroll_body_timeout: ENROLL_BODY_TIMEOUT,
+            challenge_key: None,
+            challenge_limiter: Arc::new(RateLimiter::new(CHALLENGE_RATE_LIMIT)),
+            session_limiter: Arc::new(RateLimiter::new(AGENT_AUTH_RATE_LIMIT)),
+            connect_limiter: Arc::new(RateLimiter::new(AGENT_AUTH_RATE_LIMIT)),
+            agent_settings: AgentConnectionSettings::default(),
+            agent_hub: Arc::default(),
         }
+    }
+
+    /// Enables agent connections, with MACs keyed by the configured challenge key.
+    pub fn with_agent_challenge_key(mut self, key: vn_config::ChallengeKey) -> Self {
+        self.challenge_key = Some(Arc::new(ChallengeKey::new(key)));
+        self
+    }
+
+    /// Changes agent connection timings and limits, so tests need not wait for the
+    /// defaults.
+    pub fn with_agent_connection_settings(mut self, settings: AgentConnectionSettings) -> Self {
+        self.agent_settings = settings;
+        self
+    }
+
+    /// Prepares for agent connections and starts their background tasks: closes
+    /// connection rows a previous server process left open, deletes expired sessions,
+    /// and starts the revocation listener and periodic cleanup. Call it once at startup,
+    /// before serving, and [`AgentTasks::shutdown`] after serving, before closing the
+    /// pool.
+    pub async fn start_agent_tasks(&self) -> sqlx::Result<AgentTasks> {
+        agents::start_tasks(&self.db, self.agent_hub.clone()).await
     }
 
     /// Believes `X-Forwarded-For` from these reverse proxies when resolving client
@@ -135,7 +189,16 @@ pub fn router(state: AppState, static_dir: Option<&Path>) -> Router {
         .route(
             "/enroll",
             post(agents::enroll).layer(DefaultBodyLimit::max(ENROLL_BODY_LIMIT)),
-        );
+        )
+        .route(
+            "/auth/challenge",
+            post(agents::challenge).layer(DefaultBodyLimit::max(AGENT_AUTH_BODY_LIMIT)),
+        )
+        .route(
+            "/auth/session",
+            post(agents::session).layer(DefaultBodyLimit::max(AGENT_AUTH_BODY_LIMIT)),
+        )
+        .route("/connect", get(agents::connect));
     let v1 = Router::new()
         .route("/health", get(health))
         .nest("/auth", auth_routes)

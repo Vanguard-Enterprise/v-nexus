@@ -1,11 +1,15 @@
-//! Agent enrollment tokens, enrollment, and revocation.
+//! Agent enrollment tokens, enrollment, authentication, connections, and revocation.
 //!
 //! For the first release only installation admins create and revoke enrollment tokens
 //! and agents ([`ProjectPermission::ManageAgents`]). Project members with view access can
 //! list a project's agents.
 
+mod connection;
+mod dispatch;
 mod enroll;
+mod hub;
 pub(crate) mod manifest;
+mod session;
 mod token;
 
 use axum::Json;
@@ -23,7 +27,12 @@ use vn_core::{
     EnrollmentTokenStatus, MAX_ENROLLMENT_TOKEN_MINUTES,
 };
 
+pub use connection::AgentConnectionSettings;
+pub(crate) use connection::connect;
 pub(crate) use enroll::enroll;
+pub use hub::AgentTasks;
+pub(crate) use hub::{ConnectionHub, start as start_tasks};
+pub(crate) use session::{ChallengeKey, challenge, session};
 
 use crate::audit::AuditEvent;
 use crate::auth::{Principal, Token};
@@ -398,8 +407,9 @@ pub(crate) async fn list(
 
 /// `POST /api/v1/projects/{slug}/agents/{agent_id}/revoke` (installation admins)
 ///
-/// One transaction marks the agent revoked, records the audit event, and notifies
-/// [`AGENT_REVOKED_CHANNEL`]. The cluster, its source, and its inventory stay.
+/// One transaction marks the agent revoked, deletes its sessions, records the audit
+/// event, and notifies [`AGENT_REVOKED_CHANNEL`], which closes its open connection. The
+/// cluster, its source, and its inventory stay.
 pub(crate) async fn revoke(
     State(state): State<AppState>,
     principal: Principal,
@@ -435,7 +445,7 @@ pub(crate) async fn revoke(
         .details(json!({ "reason": AgentRevocationReason::Revoked }))
         .record(&mut tx)
         .await?;
-    notify_revoked(&mut tx, agent_id).await?;
+    revoke_access(&mut tx, agent_id).await?;
     let row = load_agent(&mut *tx, project.id, agent_id)
         .await?
         .ok_or_else(|| ApiFailure::internal("revoked agent vanished"))?;
@@ -443,9 +453,15 @@ pub(crate) async fn revoke(
     Ok(Json(row.into_agent()?))
 }
 
-/// Announces a revocation on [`AGENT_REVOKED_CHANNEL`]. PostgreSQL delivers it when the
-/// transaction commits, and not at all if it rolls back.
-async fn notify_revoked(conn: &mut PgConnection, agent_id: Uuid) -> sqlx::Result<()> {
+/// Ends a revoked agent's access, inside the transaction that revokes it: deletes its
+/// sessions, so no new connection opens, and announces the revocation on
+/// [`AGENT_REVOKED_CHANNEL`], so servers close its open connection. PostgreSQL delivers
+/// the notification when the transaction commits, and not at all if it rolls back.
+async fn revoke_access(conn: &mut PgConnection, agent_id: Uuid) -> sqlx::Result<()> {
+    sqlx::query("DELETE FROM agent_sessions WHERE agent_id = $1")
+        .bind(agent_id)
+        .execute(&mut *conn)
+        .await?;
     sqlx::query("SELECT pg_notify($1, $2)")
         .bind(AGENT_REVOKED_CHANNEL)
         .bind(agent_id.to_string())

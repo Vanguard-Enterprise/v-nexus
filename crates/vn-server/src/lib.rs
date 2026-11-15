@@ -11,6 +11,7 @@ mod projects;
 mod rate_limit;
 mod router;
 
+pub use agents::{AgentConnectionSettings, AgentTasks};
 pub use auth::{AuthService, AuthSetupError};
 pub use health::{DatabaseHealth, PingFuture};
 pub use router::{AppState, router};

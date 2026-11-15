@@ -16,14 +16,16 @@ vn-server = { path = "crates/vn-server" }
 
 # External crates
 anyhow = "1.0.104"
-axum = "0.8.9"
+axum = { version = "0.8.9", features = ["ws"] }
 axum-extra = { version = "0.12.6", default-features = false, features = ["cookie"] }
 base64 = "0.22.1"
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "serde", "std"] }
 clap = { version = "4.6.7", features = ["derive", "env"] }
 cookie = "0.18.1"
 ed25519-dalek = "3.0.0"
+futures-util = { version = "0.3.34", default-features = false, features = ["sink", "std"] }
 getrandom = "0.4.3"
+hmac = "0.12.1"
 http-body-util = "0.1.5"
 ipnet = { version = "2.12.2", features = ["serde"] }
 openidconnect = { version = "4.1.0", default-features = false }
@@ -48,7 +50,10 @@ thiserror = "2.0.21"
 tokio = { version = "1.54.1", features = ["macros", "net", "rt-multi-thread", "signal", "time"] }
 tower = { version = "0.5.3", features = ["util"] }
 tower-http = { version = "0.7.1", features = ["fs", "trace"] }
+tokio-tungstenite = "0.29.0"
 tracing = "0.1.44"
+# Must match the version axum's `ws` feature uses, so its errors can be inspected.
+tungstenite = { version = "0.29.0", default-features = false }
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
 url = "2.5.8"
 uuid = { version = "1.29.2", features = ["serde"] }

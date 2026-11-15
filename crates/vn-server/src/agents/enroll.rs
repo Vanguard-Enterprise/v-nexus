@@ -27,7 +27,7 @@ use vn_core::{
     enrollment_signing_message,
 };
 
-use super::{installation_id, notify_revoked, token};
+use super::{installation_id, revoke_access, token};
 use crate::audit::AuditEvent;
 use crate::client_addr::ClientAddr;
 use crate::error::{ApiFailure, ApiJson};
@@ -460,7 +460,7 @@ async fn enroll_agent(
             }))
             .record(&mut tx)
             .await?;
-        notify_revoked(&mut tx, previous).await?;
+        revoke_access(&mut tx, previous).await?;
     }
     AuditEvent::system("agent.enroll")
         .project(project_id)
@@ -546,7 +546,7 @@ fn decode_fixed<const N: usize>(value: &str) -> Option<[u8; N]> {
     URL_SAFE_NO_PAD.decode(value).ok()?.try_into().ok()
 }
 
-fn is_printable(value: &str, max_len: usize) -> bool {
+pub(super) fn is_printable(value: &str, max_len: usize) -> bool {
     (1..=max_len).contains(&value.len()) && value.bytes().all(|b| b.is_ascii_graphic())
 }
 

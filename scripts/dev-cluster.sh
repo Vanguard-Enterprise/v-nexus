@@ -100,7 +100,11 @@ cmd_load() {
   require_cluster
   build_image
   load_image
-  if kc -n "$NAMESPACE" get deployment/vn-agent >/dev/null 2>&1; then
+  # --ignore-not-found prints nothing for a missing Deployment, so any other failure
+  # (an unreachable cluster, a missing kube context) still stops the script.
+  local deployment
+  deployment=$(kc -n "$NAMESPACE" get deployment vn-agent --ignore-not-found -o name)
+  if [[ -n $deployment ]]; then
     kc -n "$NAMESPACE" rollout restart deployment/vn-agent
     kc -n "$NAMESPACE" rollout status deployment/vn-agent --timeout 120s
   else

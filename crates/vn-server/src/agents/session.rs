@@ -18,7 +18,7 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chrono::{DateTime, TimeDelta, Utc};
 use ed25519_dalek::{Signature, VerifyingKey};
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use serde::de::DeserializeOwned;
 use serde_json::json;
 use sha2::Sha256;

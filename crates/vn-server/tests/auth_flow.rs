@@ -188,7 +188,7 @@ fn rsa_pem() -> &'static str {
     static PEM: OnceLock<String> = OnceLock::new();
     PEM.get_or_init(|| {
         use rsa::pkcs1::{EncodeRsaPrivateKey, LineEnding};
-        let key = rsa::RsaPrivateKey::new(&mut rand::rngs::OsRng, 2048).unwrap();
+        let key = rsa::RsaPrivateKey::new(&mut rsa::rand_core::OsRng, 2048).unwrap();
         key.to_pkcs1_pem(LineEnding::LF).unwrap().to_string()
     })
 }

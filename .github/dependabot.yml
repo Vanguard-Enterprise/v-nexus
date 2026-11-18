@@ -7,6 +7,10 @@ updates:
     groups:
       cargo-minor-patch:
         update-types: [minor, patch]
+    ignore:
+      # The server downcasts axum's WebSocket errors to `tungstenite::Error`, so the
+      # direct dependency must stay on the version axum uses. Bump it with axum.
+      - dependency-name: tungstenite
 
   - package-ecosystem: npm
     directory: /web

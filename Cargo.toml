@@ -45,7 +45,7 @@ sqlx = { version = "0.9.0", default-features = false, features = [
     "chrono",
     "uuid",
 ] }
-rsa = { version = "0.9.10", features = ["getrandom"] }
+rsa = "0.10.0"
 rustls = { version = "0.23.46", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
 tempfile = "3.27.0"
 thiserror = "2.0.21"
@@ -68,7 +68,7 @@ unsafe_code = "forbid"
 all = { level = "warn", priority = -1 }
 
 # RSA key generation in the OIDC tests is very slow without optimization.
-[profile.dev.package.num-bigint-dig]
+[profile.dev.package.crypto-bigint]
 opt-level = 3
 
 [profile.dev.package.rsa]
